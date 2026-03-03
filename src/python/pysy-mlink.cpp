@@ -605,7 +605,7 @@ PYBIND11_MODULE(syntalos_mlink, m)
         "raise_error",
         raise_error,
         py::arg("message"),
-        "Emit an error message string, immediately terminating the current action and (if applicable) the experiment.");
+        "Emit an error message string, immediately terminating the current action and (if applicable) the experiment. Note that this does not raise an exception in Python.");
     m.def("time_since_start_msec", time_since_start_msec, "Get time since experiment started in milliseconds.");
     m.def("time_since_start_usec", time_since_start_usec, "Get time since experiment started in microseconds.");
     m.def(
