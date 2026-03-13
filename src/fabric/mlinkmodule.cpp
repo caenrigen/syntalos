@@ -865,11 +865,10 @@ bool MLinkModule::prepare(const TestSubject &subject)
     GlobalConfig gconf;
     bool ret;
 
-    // at this point, ensure the module process is actually running
-    if (!isProcessRunning()) {
-        if (!runProcess())
-            return false;
-    }
+    // Start every run with a fresh linked worker process. This avoids stale
+    // IPC state accumulating in long-lived MLink workers across runs.
+    if (!runProcess())
+        return false;
 
     auto callSetNiceness = makeClient<iox::popo::Client<SetNicenessRequest, DoneResponse>>(
         SET_NICENESS_CALL_ID.c_str());
