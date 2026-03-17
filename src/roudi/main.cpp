@@ -88,7 +88,7 @@ int main(int argc, char *argv[])
             ipcc->setMemPool2Info(mpool2Info);
         }
 
-        mpConfig.addMemPool({ONE_KILOBYTE, 50});
+        mpConfig.addMemPool({ONE_KILOBYTE, 200});
         mpConfig.addMemPool({ONE_KILOBYTE * 512, 50});
         mpConfig.addMemPool({ONE_MEGABYTE, 20});
 
