@@ -913,9 +913,9 @@ bool MLinkModule::prepare(const TestSubject &subject)
         if (state() == ModuleState::ERROR)
             return false;
 
-        // wait 10sec for the module to become ready
-        if (timer.elapsed() > 10000) {
-            raiseError("Timeout while waiting for module. Module did not transition to 'ready' state in time.");
+        // we give modules 30sec to prepare, in case they are very slow
+        if (timer.elapsed() > 30 * MS_PER_S) {
+            raiseError("Timeout while waiting for module. Module did not transition to 'ready' state in 30 seconds.");
             return false;
         }
     }
