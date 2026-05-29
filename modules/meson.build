@@ -30,6 +30,7 @@ subdir('videorecorder')
 subdir('videotransform')
 subdir('prism')
 subdir('camera-generic')
+subdir('camera-v4l2')
 
 if 'camera-arv' in modules_enabled
     subdir('camera-arv')

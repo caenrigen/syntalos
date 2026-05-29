@@ -1,0 +1,803 @@
+/*
+ * Copyright (C) 2026 Matthias Klumpp <matthias@tenstral.net>
+ *
+ * Licensed under the GNU Lesser General Public License Version 3
+ */
+
+#include "v4l2cameramodule.h"
+
+#include "datactl/frametype.h"
+#include "utils/misc.h"
+#include "v4l2settingsdialog.h"
+
+#include <QApplication>
+#include <QMessageBox>
+#include <QMetaObject>
+#include <QMutex>
+#include <QMutexLocker>
+
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <fcntl.h>
+#include <linux/videodev2.h>
+#include <optional>
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <vector>
+
+SYNTALOS_MODULE(V4L2CameraModule)
+
+namespace
+{
+
+struct MMapBuffer {
+    void *start = nullptr;
+    size_t length = 0;
+};
+
+int xioctl(int fd, unsigned long request, void *arg)
+{
+    int ret;
+    do {
+        ret = ioctl(fd, request, arg);
+    } while (ret == -1 && errno == EINTR);
+    return ret;
+}
+
+QString errnoString()
+{
+    return QString::fromLocal8Bit(std::strerror(errno));
+}
+
+bool requestMMapBuffers(int fd, std::vector<MMapBuffer> *buffers, QString *error)
+{
+    v4l2_requestbuffers req = {};
+    req.count = 6;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+
+    if (xioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("VIDIOC_REQBUFS failed: %1").arg(errnoString());
+        return false;
+    }
+    if (req.count < 2) {
+        if (error != nullptr)
+            *error = QStringLiteral("V4L2 driver allocated too few streaming buffers.");
+        return false;
+    }
+
+    buffers->resize(req.count);
+    for (quint32 i = 0; i < req.count; ++i) {
+        v4l2_buffer buf = {};
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+
+        if (xioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+            if (error != nullptr)
+                *error = QStringLiteral("VIDIOC_QUERYBUF failed for buffer %1: %2").arg(i).arg(errnoString());
+            return false;
+        }
+
+        (*buffers)[i].length = buf.length;
+        (*buffers)[i].start = mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
+        if ((*buffers)[i].start == MAP_FAILED) {
+            (*buffers)[i].start = nullptr;
+            if (error != nullptr)
+                *error = QStringLiteral("mmap failed for V4L2 buffer %1: %2").arg(i).arg(errnoString());
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void releaseMMapBuffers(int fd, std::vector<MMapBuffer> *buffers)
+{
+    for (auto &buffer : *buffers) {
+        if (buffer.start != nullptr) {
+            munmap(buffer.start, buffer.length);
+            buffer.start = nullptr;
+            buffer.length = 0;
+        }
+    }
+    buffers->clear();
+
+    if (fd >= 0) {
+        v4l2_requestbuffers req = {};
+        req.count = 0;
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        req.memory = V4L2_MEMORY_MMAP;
+        xioctl(fd, VIDIOC_REQBUFS, &req);
+    }
+}
+
+bool queueAllBuffers(int fd, size_t count, QString *error)
+{
+    for (quint32 i = 0; i < count; ++i) {
+        v4l2_buffer buf = {};
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+            if (error != nullptr)
+                *error = QStringLiteral("VIDIOC_QBUF failed for buffer %1: %2").arg(i).arg(errnoString());
+            return false;
+        }
+    }
+    return true;
+}
+
+nanoseconds_t v4l2TimestampToNsec(const timeval &timestamp)
+{
+    return nanoseconds_t(static_cast<int64_t>(timestamp.tv_sec) * 1000LL * 1000LL * 1000LL
+                         + static_cast<int64_t>(timestamp.tv_usec) * 1000LL);
+}
+
+void logWarning(QuillLogger *log, const QString &message)
+{
+    LOG_WARNING(log, "{}", message.toStdString());
+}
+
+} // namespace
+
+class V4L2CameraModule : public AbstractModule
+{
+    Q_OBJECT
+
+private:
+    V4L2SettingsDialog *m_settingsDialog;
+    std::shared_ptr<DataStream<Frame>> m_outStream;
+
+    std::atomic_bool m_stopped;
+    std::atomic_int m_stopEventFd;
+    std::atomic_bool m_warnedReadbackMismatch;
+    std::atomic_bool m_warnedTimestampFallback;
+    std::atomic_bool m_warnedExposurePriority;
+
+    V4L2Camera::DeviceIdentity m_device;
+    V4L2Camera::CaptureMode m_requestedMode;
+    V4L2Camera::CaptureMode m_effectiveMode;
+    QHash<quint32, V4L2Camera::ControlInfo> m_controlMap;
+
+    QMutex m_controlMutex;
+    QHash<quint32, qint64> m_desiredControlValues;
+    QHash<quint32, qint64> m_pendingControlWrites;
+
+public:
+    explicit V4L2CameraModule(QObject *parent = nullptr)
+        : AbstractModule(parent),
+          m_settingsDialog(new V4L2SettingsDialog),
+          m_stopped(true),
+          m_stopEventFd(-1),
+          m_warnedReadbackMismatch(false),
+          m_warnedTimestampFallback(false),
+          m_warnedExposurePriority(false)
+    {
+        m_outStream = registerOutputPort<Frame>(QStringLiteral("video"), QStringLiteral("Video"));
+        addSettingsWindow(m_settingsDialog);
+
+        connect(m_settingsDialog, &V4L2SettingsDialog::controlValueChanged, this, [this](quint32 id, qint64 value) {
+            if (m_stopped.load())
+                return;
+            QMutexLocker locker(&m_controlMutex);
+            m_desiredControlValues[id] = value;
+            m_pendingControlWrites[id] = value;
+        });
+    }
+
+    ~V4L2CameraModule() override = default;
+
+    void setName(const QString &name) override
+    {
+        AbstractModule::setName(name);
+        m_settingsDialog->setWindowTitle(QStringLiteral("Settings for %1").arg(name));
+    }
+
+    ModuleDriverKind driver() const override
+    {
+        return ModuleDriverKind::THREAD_DEDICATED;
+    }
+
+    ModuleFeatures features() const override
+    {
+        return ModuleFeature::REALTIME | ModuleFeature::SHOW_SETTINGS;
+    }
+
+    bool prepare(const TestSubject &) override
+    {
+        m_warnedReadbackMismatch = false;
+        m_warnedTimestampFallback = false;
+        m_warnedExposurePriority = false;
+        m_pendingControlWrites.clear();
+
+        auto wantedDevice = m_settingsDialog->selectedDevice();
+        QString matchWarning;
+        const auto matchedDevice = V4L2Camera::findDevice(wantedDevice, &matchWarning);
+        if (!matchedDevice.has_value()) {
+            raiseError(matchWarning.isEmpty() ? QStringLiteral("No V4L2 camera selected.") : matchWarning);
+            return false;
+        }
+        if (!matchWarning.isEmpty()) {
+            logWarning(m_log, matchWarning);
+            const auto answer = QMessageBox::warning(
+                m_settingsDialog,
+                QStringLiteral("V4L2 Camera Match"),
+                matchWarning + QStringLiteral("\n\nContinue with this camera?"),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (answer != QMessageBox::Yes)
+                return false;
+        }
+
+        m_device = matchedDevice.value();
+        m_requestedMode = m_settingsDialog->selectedMode();
+        if (!m_requestedMode.isValid()) {
+            raiseError(QStringLiteral("No valid V4L2 capture mode selected."));
+            return false;
+        }
+
+        {
+            QMutexLocker locker(&m_controlMutex);
+            m_desiredControlValues = m_settingsDialog->desiredControlValues();
+        }
+
+        V4L2Camera::Device device;
+        QList<V4L2Camera::ControlInfo> controls;
+        QString error;
+        if (!configureDevice(device, &m_effectiveMode, &controls, &error, true)) {
+            raiseError(error);
+            return false;
+        }
+
+        V4L2Camera::FrameDecoder decoderCheck;
+        if (!decoderCheck.configure(m_effectiveMode, &error)) {
+            raiseError(error);
+            return false;
+        }
+
+        updateControlMap(controls);
+        m_settingsDialog->replaceControls(controls);
+        m_settingsDialog->setEffectiveMode(m_effectiveMode);
+        m_settingsDialog->setRunning(true);
+
+        m_outStream->setMetadataValue("size", MetaSize(m_effectiveMode.width, m_effectiveMode.height));
+        m_outStream->setMetadataValue("framerate", m_effectiveMode.fps());
+        m_outStream->setMetadataValue("timeperframe_num", static_cast<int64_t>(m_effectiveMode.timeperframeNum));
+        m_outStream->setMetadataValue("timeperframe_den", static_cast<int64_t>(m_effectiveMode.timeperframeDen));
+        m_outStream->setMetadataValue("depth", static_cast<int64_t>(CV_MAT_DEPTH(m_effectiveMode.cvType)));
+        m_outStream->setMetadataValue("has_color", CV_MAT_CN(m_effectiveMode.cvType) > 1);
+        m_outStream->setMetadataValue("fourcc", m_effectiveMode.fourccString.toStdString());
+        m_outStream->setMetadataValue("stride", static_cast<int64_t>(m_effectiveMode.bytesPerLine));
+        m_outStream->setMetadataValue("colorspace", static_cast<int64_t>(m_effectiveMode.colorspace));
+        m_outStream->setMetadataValue("field", static_cast<int64_t>(m_effectiveMode.field));
+        m_outStream->setMetadataValue("bayer_pattern", std::string("none"));
+        m_outStream->start();
+
+        statusMessage(QStringLiteral("Waiting."));
+        return true;
+    }
+
+    void runThread(OptionalWaitCondition *waitCondition) override
+    {
+        m_stopped = false;
+
+        V4L2Camera::Device device;
+        QList<V4L2Camera::ControlInfo> controls;
+        QString error;
+        bool streaming = false;
+        std::vector<MMapBuffer> buffers;
+        auto clockSync = initClockSynchronizer(m_effectiveMode.fps());
+
+        const int stopFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        m_stopEventFd = stopFd;
+
+        auto cleanup = [&]() {
+            if (streaming) {
+                int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                xioctl(device.fd(), VIDIOC_STREAMOFF, &type);
+                streaming = false;
+            }
+            releaseMMapBuffers(device.fd(), &buffers);
+            if (stopFd >= 0) {
+                m_stopEventFd = -1;
+                ::close(stopFd);
+            }
+            safeStopSynchronizer(clockSync);
+            QMetaObject::invokeMethod(m_settingsDialog, [this]() { m_settingsDialog->setRunning(false); }, Qt::QueuedConnection);
+            m_stopped = true;
+        };
+
+        if (stopFd < 0) {
+            raiseError(QStringLiteral("Unable to create V4L2 stop eventfd: %1").arg(errnoString()));
+            cleanup();
+            return;
+        }
+
+        if (!clockSync) {
+            raiseError(QStringLiteral("Unable to set up clock synchronizer!"));
+            cleanup();
+            return;
+        }
+        clockSync->setStrategies(TimeSyncStrategy::SHIFT_TIMESTAMPS_FWD | TimeSyncStrategy::SHIFT_TIMESTAMPS_BWD);
+        if (!clockSync->start()) {
+            raiseError(QStringLiteral("Unable to start clock synchronizer!"));
+            cleanup();
+            return;
+        }
+
+        if (!configureDevice(device, &m_effectiveMode, &controls, &error, true)) {
+            raiseError(error);
+            cleanup();
+            return;
+        }
+        updateControlMap(controls);
+
+        V4L2Camera::FrameDecoder decoder;
+        if (!decoder.configure(m_effectiveMode, &error)) {
+            raiseError(error);
+            cleanup();
+            return;
+        }
+
+        if (!requestMMapBuffers(device.fd(), &buffers, &error) || !queueAllBuffers(device.fd(), buffers.size(), &error)) {
+            raiseError(error);
+            cleanup();
+            return;
+        }
+
+        statusMessage(QStringLiteral("%1").arg(m_device.displayName()));
+        waitCondition->wait(this);
+        if (!m_running) {
+            cleanup();
+            return;
+        }
+
+        int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (xioctl(device.fd(), VIDIOC_STREAMON, &type) < 0) {
+            raiseError(QStringLiteral("VIDIOC_STREAMON failed: %1").arg(errnoString()));
+            cleanup();
+            return;
+        }
+        streaming = true;
+
+        uint64_t frameCount = 0;
+        uint64_t invalidFrameCount = 0;
+        uint64_t sequenceGapCount = 0;
+        std::optional<quint32> lastSequence;
+        std::optional<nanoseconds_t> lastDriverTimestamp;
+        std::optional<microseconds_t> lastFrameTime;
+        nanoseconds_t driverToMasterOffset{0};
+        bool driverOffsetKnown = false;
+        bool useDriverTimestamps = true;
+        const auto expectedFrameNs = nanoseconds_t(
+            static_cast<int64_t>((1'000'000'000.0 * m_effectiveMode.timeperframeNum) / m_effectiveMode.timeperframeDen));
+
+        auto lastStatusTime = std::chrono::steady_clock::now();
+        uint64_t lastStatusFrame = 0;
+
+        while (m_running) {
+            applyPendingControlWrites(device);
+
+            pollfd fds[2] = {};
+            fds[0].fd = device.fd();
+            fds[0].events = POLLIN | POLLERR | POLLHUP;
+            fds[1].fd = stopFd;
+            fds[1].events = POLLIN;
+
+            const int pollResult = poll(fds, 2, 1000);
+            if (pollResult < 0) {
+                if (errno == EINTR)
+                    continue;
+                raiseError(QStringLiteral("poll failed while waiting for V4L2 frame: %1").arg(errnoString()));
+                break;
+            }
+            if (pollResult == 0)
+                continue;
+            if ((fds[1].revents & POLLIN) != 0)
+                break;
+            if ((fds[0].revents & (POLLHUP | POLLNVAL)) != 0) {
+                raiseError(QStringLiteral("V4L2 camera disappeared or became invalid."));
+                break;
+            }
+
+            while (m_running) {
+                v4l2_buffer buf = {};
+                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                buf.memory = V4L2_MEMORY_MMAP;
+
+                if (xioctl(device.fd(), VIDIOC_DQBUF, &buf) < 0) {
+                    if (errno == EAGAIN)
+                        break;
+                    if (errno == ENODEV || errno == EIO) {
+                        raiseError(QStringLiteral("V4L2 camera returned a capture error: %1").arg(errnoString()));
+                        m_running = false;
+                        break;
+                    }
+                    invalidFrameCount++;
+                    logWarning(m_log, QStringLiteral("VIDIOC_DQBUF failed: %1").arg(errnoString()));
+                    if (invalidFrameCount > 16) {
+                        raiseError(QStringLiteral("Too many V4L2 frame dequeue failures."));
+                        m_running = false;
+                    }
+                    break;
+                }
+
+                const auto dequeueMasterNs = m_syTimer->timeSinceStartNsec();
+                if (buf.index >= buffers.size()) {
+                    raiseError(QStringLiteral("V4L2 driver returned an invalid buffer index."));
+                    m_running = false;
+                    break;
+                }
+
+                if (lastSequence.has_value()) {
+                    const quint32 expected = *lastSequence + 1;
+                    if (buf.sequence != expected) {
+                        const quint32 gap = buf.sequence - expected;
+                        sequenceGapCount += gap == 0 ? 1 : gap;
+                        logWarning(
+                            m_log,
+                            QStringLiteral("V4L2 sequence gap detected: expected %1, got %2 (total gaps: %3).")
+                                .arg(expected)
+                                .arg(buf.sequence)
+                                .arg(sequenceGapCount));
+                    }
+                }
+                lastSequence = buf.sequence;
+
+                cv::Mat image;
+                const auto bytesUsed = buf.bytesused == 0 ? buffers[buf.index].length : static_cast<size_t>(buf.bytesused);
+                const auto *data = static_cast<const quint8 *>(buffers[buf.index].start);
+                if (!decoder.decode(data, bytesUsed, &image, &error)) {
+                    invalidFrameCount++;
+                    logWarning(m_log, QStringLiteral("Failed to decode V4L2 frame: %1").arg(error));
+                } else if (image.cols != m_effectiveMode.width || image.rows != m_effectiveMode.height) {
+                    invalidFrameCount++;
+                    logWarning(
+                        m_log,
+                        QStringLiteral("Decoded V4L2 frame has unexpected dimensions %1x%2.")
+                            .arg(image.cols)
+                            .arg(image.rows));
+                } else {
+                    const bool timestampMonotonic =
+                        (buf.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+                    const auto driverTimestamp = v4l2TimestampToNsec(buf.timestamp);
+                    microseconds_t frameTime = nsecToUsec(dequeueMasterNs);
+
+                    if (timestampMonotonic && useDriverTimestamps && driverTimestamp.count() > 0) {
+                        if (!driverOffsetKnown) {
+                            driverToMasterOffset = dequeueMasterNs - driverTimestamp;
+                            driverOffsetKnown = true;
+                        }
+
+                        bool sane = true;
+                        if (lastDriverTimestamp.has_value()) {
+                            const auto delta = driverTimestamp - *lastDriverTimestamp;
+                            if (delta.count() <= 0 || (expectedFrameNs.count() > 0 && delta > expectedFrameNs * 20))
+                                sane = false;
+                        }
+
+                        if (sane) {
+                            frameTime = nsecToUsec(driverTimestamp + driverToMasterOffset);
+                            clockSync->processTimestamp(frameTime, nsecToUsec(driverTimestamp));
+                            lastDriverTimestamp = driverTimestamp;
+                        } else {
+                            useDriverTimestamps = false;
+                            warnOnce(
+                                &m_warnedTimestampFallback,
+                                QStringLiteral("V4L2 Timestamp Fallback"),
+                                QStringLiteral("Driver timestamps became implausible; using Syntalos dequeue time."));
+                        }
+                    }
+
+                    if (!timestampMonotonic || !useDriverTimestamps) {
+                        frameTime = nsecToUsec(dequeueMasterNs);
+                        clockSync->processTimestamp(frameTime, frameTime);
+                    }
+
+                    if (lastFrameTime.has_value() && frameTime <= *lastFrameTime)
+                        frameTime = *lastFrameTime + microseconds_t(1);
+                    lastFrameTime = frameTime;
+
+                    m_outStream->push(Frame(image, frameCount++, frameTime));
+                    invalidFrameCount = 0;
+                }
+
+                if (xioctl(device.fd(), VIDIOC_QBUF, &buf) < 0) {
+                    raiseError(QStringLiteral("VIDIOC_QBUF failed after frame processing: %1").arg(errnoString()));
+                    m_running = false;
+                    break;
+                }
+
+                if (invalidFrameCount > 16) {
+                    raiseError(QStringLiteral("Too many V4L2 frame decode failures."));
+                    m_running = false;
+                    break;
+                }
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStatusTime);
+            if (elapsed.count() >= 2000) {
+                const auto frames = frameCount - lastStatusFrame;
+                const double fps = static_cast<double>(frames) * 1000.0 / static_cast<double>(elapsed.count());
+                statusMessage(QStringLiteral("Capturing %1 fps, sequence gaps %2").arg(fps, 0, 'f', 1).arg(sequenceGapCount));
+                lastStatusFrame = frameCount;
+                lastStatusTime = now;
+            }
+        }
+
+        cleanup();
+    }
+
+    void stop() override
+    {
+        statusMessage(QStringLiteral("Cleaning up..."));
+        m_running = false;
+
+        const int stopFd = m_stopEventFd.load();
+        if (stopFd >= 0) {
+            uint64_t value = 1;
+            const auto unused = ::write(stopFd, &value, sizeof(value));
+            Q_UNUSED(unused);
+        }
+
+        while (!m_stopped.load())
+            appProcessEvents();
+
+        m_settingsDialog->setRunning(false);
+        statusMessage(QStringLiteral("Camera stopped."));
+        AbstractModule::stop();
+    }
+
+    void serializeSettings(const QString &, QVariantHash &settings, QByteArray &) override
+    {
+        m_settingsDialog->serializeSettings(settings);
+    }
+
+    bool loadSettings(const QString &, const QVariantHash &settings, const QByteArray &) override
+    {
+        m_settingsDialog->loadSettings(settings);
+        return true;
+    }
+
+protected:
+    void usbHotplugEvent(UsbHotplugEventKind kind) override
+    {
+        if (!m_stopped)
+            return;
+        if (kind == UsbHotplugEventKind::DEVICE_ARRIVED || kind == UsbHotplugEventKind::DEVICES_CHANGE
+            || kind == UsbHotplugEventKind::DEVICE_LEFT)
+            m_settingsDialog->refreshDevices();
+    }
+
+private:
+    bool configureDevice(
+        V4L2Camera::Device &device,
+        V4L2Camera::CaptureMode *effectiveMode,
+        QList<V4L2Camera::ControlInfo> *controls,
+        QString *error,
+        bool applyControls)
+    {
+        if (!device.open(m_device.devicePath, error))
+            return false;
+
+        if (!device.applyCaptureMode(m_requestedMode, effectiveMode, error))
+            return false;
+
+        auto queriedControls = device.queryControls(nullptr);
+        if (applyControls) {
+            applyDesiredControls(device, &queriedControls);
+
+            queriedControls = device.queryControls(nullptr);
+            if (!device.applyCaptureMode(m_requestedMode, effectiveMode, error))
+                return false;
+        }
+
+        if (controls != nullptr)
+            *controls = queriedControls;
+        return true;
+    }
+
+    void applyDesiredControls(V4L2Camera::Device &device, QList<V4L2Camera::ControlInfo> *controls)
+    {
+        QHash<quint32, qint64> desired;
+        {
+            QMutexLocker locker(&m_controlMutex);
+            desired = m_desiredControlValues;
+        }
+
+        if (desired.contains(V4L2_CID_EXPOSURE_AUTO_PRIORITY) && desired.value(V4L2_CID_EXPOSURE_AUTO_PRIORITY) != 0) {
+            warnOnce(
+                &m_warnedExposurePriority,
+                QStringLiteral("Variable FPS Control"),
+                QStringLiteral(
+                    "V4L2 exposure auto priority is enabled. This can allow variable frame timing; actual FPS will be read back."));
+        }
+
+        auto sortedControls = *controls;
+        const auto autoIds = V4L2Camera::autoControlIds();
+        std::sort(sortedControls.begin(), sortedControls.end(), [&autoIds](const auto &a, const auto &b) {
+            const auto aPriority = autoIds.contains(a.id) || a.id == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+            const auto bPriority = autoIds.contains(b.id) || b.id == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+            if (aPriority != bPriority)
+                return aPriority < bPriority;
+            return a.id < b.id;
+        });
+
+        for (auto &control : sortedControls) {
+            if (!desired.contains(control.id))
+                continue;
+            if (!control.restorable())
+                continue;
+            if (V4L2Camera::isManualDependentActive(control.id, desired))
+                continue;
+
+            const auto requestedValue = desired.value(control.id);
+            const auto result = device.setControlValue(control, requestedValue);
+            if (!result.success) {
+                logWarning(m_log, result.error);
+                continue;
+            }
+
+            desired[control.id] = result.readbackValue;
+            if (result.changedByDevice) {
+                warnOnce(
+                    &m_warnedReadbackMismatch,
+                    QStringLiteral("V4L2 Control Readback"),
+                    QStringLiteral("Control '%1' read back as %2 after requesting %3.")
+                        .arg(control.name)
+                        .arg(result.readbackValue)
+                        .arg(result.requestedValue));
+            }
+        }
+
+        {
+            QMutexLocker locker(&m_controlMutex);
+            m_desiredControlValues = desired;
+        }
+    }
+
+    void applyPendingControlWrites(V4L2Camera::Device &device)
+    {
+        QHash<quint32, qint64> pending;
+        QHash<quint32, qint64> desired;
+        {
+            QMutexLocker locker(&m_controlMutex);
+            pending = m_pendingControlWrites;
+            m_pendingControlWrites.clear();
+            desired = m_desiredControlValues;
+        }
+
+        if (pending.isEmpty())
+            return;
+
+        bool needControlRefresh = false;
+        for (auto it = pending.constBegin(); it != pending.constEnd(); ++it) {
+            if (!m_controlMap.contains(it.key()))
+                continue;
+
+            const auto control = m_controlMap.value(it.key());
+            if (V4L2Camera::isManualDependentActive(control.id, desired))
+                continue;
+
+            const auto result = device.setControlValue(control, it.value());
+            if (!result.success) {
+                logWarning(m_log, result.error);
+                continue;
+            }
+
+            desired[control.id] = result.readbackValue;
+            m_controlMap[control.id].currentValue = result.readbackValue;
+            QMetaObject::invokeMethod(
+                m_settingsDialog,
+                [this, id = control.id, value = result.readbackValue]() { m_settingsDialog->updateControlReadback(id, value); },
+                Qt::QueuedConnection);
+
+            if (result.changedByDevice) {
+                warnOnce(
+                    &m_warnedReadbackMismatch,
+                    QStringLiteral("V4L2 Control Readback"),
+                    QStringLiteral("Control '%1' read back as %2 after requesting %3.")
+                        .arg(control.name)
+                        .arg(result.readbackValue)
+                        .arg(result.requestedValue));
+            }
+            if (V4L2Camera::autoControlIds().contains(control.id))
+                needControlRefresh = true;
+        }
+
+        {
+            QMutexLocker locker(&m_controlMutex);
+            m_desiredControlValues = desired;
+        }
+
+        if (needControlRefresh) {
+            auto controls = device.queryControls(nullptr);
+            updateControlMap(controls);
+            {
+                QMutexLocker locker(&m_controlMutex);
+                for (const auto &control : controls)
+                    m_desiredControlValues[control.id] = control.currentValue;
+            }
+            QMetaObject::invokeMethod(
+                m_settingsDialog,
+                [this, controls]() { m_settingsDialog->replaceControls(controls); },
+                Qt::QueuedConnection);
+        }
+    }
+
+    void updateControlMap(const QList<V4L2Camera::ControlInfo> &controls)
+    {
+        m_controlMap.clear();
+        for (const auto &control : controls) {
+            if (!control.isClassMarker())
+                m_controlMap.insert(control.id, control);
+        }
+    }
+
+    void warnOnce(std::atomic_bool *flag, const QString &title, const QString &message)
+    {
+        if (flag->exchange(true))
+            return;
+
+        logWarning(m_log, message);
+        QMetaObject::invokeMethod(
+            m_settingsDialog,
+            [this, title, message]() { QMessageBox::warning(m_settingsDialog, title, message); },
+            Qt::QueuedConnection);
+    }
+};
+
+QString V4L2CameraModuleInfo::id() const
+{
+    return QStringLiteral("camera-v4l2");
+}
+
+QString V4L2CameraModuleInfo::name() const
+{
+    return QStringLiteral("V4L2 Camera");
+}
+
+QString V4L2CameraModuleInfo::summary() const
+{
+    return QStringLiteral("Capture frames from V4L2 cameras using native streaming I/O.");
+}
+
+QString V4L2CameraModuleInfo::description() const
+{
+    return QStringLiteral("Capture GREY, YUYV, and MJPEG frames from Linux V4L2 devices with native mmap buffers and V4L2 controls.");
+}
+
+QString V4L2CameraModuleInfo::authors() const
+{
+    return QStringLiteral("2026 Matthias Klumpp");
+}
+
+QString V4L2CameraModuleInfo::license() const
+{
+    return QStringLiteral("LGPL-3.0+");
+}
+
+ModuleCategories V4L2CameraModuleInfo::categories() const
+{
+    return ModuleCategory::DEVICES;
+}
+
+QColor V4L2CameraModuleInfo::color() const
+{
+    return QColor::fromRgba(qRgba(29, 158, 246, 180)).darker();
+}
+
+AbstractModule *V4L2CameraModuleInfo::createModule(QObject *parent)
+{
+    return new V4L2CameraModule(parent);
+}
+
+#include "v4l2cameramodule.moc"
