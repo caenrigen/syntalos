@@ -190,6 +190,29 @@ bool fitsInt(qint64 value)
     return value >= std::numeric_limits<int>::min() && value <= std::numeric_limits<int>::max();
 }
 
+AVPixelFormat normalizeJpegPixelFormat(AVPixelFormat format, bool *fullRange)
+{
+    switch (format) {
+    case AV_PIX_FMT_YUVJ420P:
+        *fullRange = true;
+        return AV_PIX_FMT_YUV420P;
+    case AV_PIX_FMT_YUVJ422P:
+        *fullRange = true;
+        return AV_PIX_FMT_YUV422P;
+    case AV_PIX_FMT_YUVJ444P:
+        *fullRange = true;
+        return AV_PIX_FMT_YUV444P;
+    case AV_PIX_FMT_YUVJ440P:
+        *fullRange = true;
+        return AV_PIX_FMT_YUV440P;
+    case AV_PIX_FMT_YUVJ411P:
+        *fullRange = true;
+        return AV_PIX_FMT_YUV411P;
+    default:
+        return format;
+    }
+}
+
 } // namespace
 
 namespace V4L2Camera
@@ -1227,7 +1250,8 @@ bool FrameDecoder::decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QS
         return false;
     }
 
-    const auto srcFmt = static_cast<AVPixelFormat>(m_avFrame->format);
+    bool srcFullRange = m_avFrame->color_range == AVCOL_RANGE_JPEG;
+    const auto srcFmt = normalizeJpegPixelFormat(static_cast<AVPixelFormat>(m_avFrame->format), &srcFullRange);
     m_swsCtx = sws_getCachedContext(
         m_swsCtx,
         m_avFrame->width,
@@ -1245,6 +1269,19 @@ bool FrameDecoder::decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QS
             *error = QStringLiteral("Unable to create MJPEG swscale context.");
         av_frame_unref(m_avFrame);
         return false;
+    }
+
+    // FFmpeg deprecates YUVJ* formats; use regular YUV and set JPEG/full range explicitly.
+    int *invTable = nullptr;
+    int *table = nullptr;
+    int srcRange = 0;
+    int dstRange = 0;
+    int brightness = 0;
+    int contrast = 0;
+    int saturation = 0;
+    if (sws_getColorspaceDetails(m_swsCtx, &invTable, &srcRange, &table, &dstRange, &brightness, &contrast, &saturation)
+        >= 0) {
+        sws_setColorspaceDetails(m_swsCtx, invTable, srcFullRange ? 1 : srcRange, table, 1, brightness, contrast, saturation);
     }
 
     out->create(m_mode.height, m_mode.width, CV_8UC3);
