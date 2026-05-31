@@ -78,6 +78,7 @@ private:
 
     bool m_running;
     bool m_blockUiSignals;
+    bool m_applyLoadedControlValues;
     V4L2Camera::DeviceIdentity m_loadedIdentity;
     V4L2Camera::CaptureMode m_loadedMode;
     QHash<quint32, qint64> m_loadedControlValues;
@@ -88,7 +89,7 @@ private:
     void buildUi();
     void clearControlTabs();
     void populateModes(const QList<V4L2Camera::CaptureMode> &modes);
-    void rebuildControls(const QList<V4L2Camera::ControlInfo> &controls);
+    void rebuildControls(const QList<V4L2Camera::ControlInfo> &controls, bool applyLoadedValues = false);
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
     void setControlWidgetValue(quint32 id, qint64 value);
     void handleControlEdited(quint32 id, qint64 value);

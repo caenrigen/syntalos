@@ -77,7 +77,8 @@ V4L2SettingsDialog::V4L2SettingsDialog(QWidget *parent)
       m_readControlsButton(nullptr),
       m_resetControlsButton(nullptr),
       m_running(false),
-      m_blockUiSignals(false)
+      m_blockUiSignals(false),
+      m_applyLoadedControlValues(false)
 {
     qRegisterMetaType<V4L2Camera::DeviceIdentity>();
     qRegisterMetaType<V4L2Camera::CaptureMode>();
@@ -154,6 +155,7 @@ void V4L2SettingsDialog::replaceControls(const QList<V4L2Camera::ControlInfo> &c
 void V4L2SettingsDialog::refreshDevices()
 {
     const auto previous = selectedDevice();
+    m_applyLoadedControlValues = false;
 
     QString enumError;
     const auto devices = V4L2Camera::enumerateDevices(&enumError);
@@ -163,20 +165,6 @@ void V4L2SettingsDialog::refreshDevices()
     for (const auto &device : devices)
         m_deviceCombo->addItem(device.displayName(), QVariant::fromValue(device));
 
-    int selectedIndex = -1;
-    for (int i = 0; i < m_deviceCombo->count(); ++i) {
-        const auto device = m_deviceCombo->itemData(i).value<V4L2Camera::DeviceIdentity>();
-        if (m_loadedIdentity.isValid() && m_loadedIdentity.exactMatch(device)) {
-            selectedIndex = i;
-            break;
-        }
-        if (selectedIndex < 0 && previous.isValid() && previous.exactMatch(device))
-            selectedIndex = i;
-    }
-    if (selectedIndex < 0 && m_deviceCombo->count() > 0)
-        selectedIndex = 0;
-    m_deviceCombo->setCurrentIndex(selectedIndex);
-
     if (devices.isEmpty()) {
         m_summaryLabel->setText(enumError.isEmpty() ? QStringLiteral("No V4L2 capture devices found.") : enumError);
         m_modeCombo->clear();
@@ -184,6 +172,37 @@ void V4L2SettingsDialog::refreshDevices()
         return;
     }
 
+    auto indexForDevice = [this](const V4L2Camera::DeviceIdentity &wanted) {
+        for (int i = 0; i < m_deviceCombo->count(); ++i) {
+            const auto device = m_deviceCombo->itemData(i).value<V4L2Camera::DeviceIdentity>();
+            if (device.devicePath == wanted.devicePath)
+                return i;
+        }
+        return -1;
+    };
+
+    V4L2Camera::DeviceMatch match;
+    if (m_loadedIdentity.isValid()) {
+        match = V4L2Camera::matchDevice(m_loadedIdentity, devices, enumError);
+        m_applyLoadedControlValues = match.trustedForSavedSettings();
+        if (!match.warning.isEmpty()) {
+            qWarning().noquote() << "camera-v4l2:" << match.warning;
+            QMessageBox::warning(this, QStringLiteral("V4L2 Camera Match"), match.warning);
+        }
+        if (!match.hasDevice()) {
+            m_deviceCombo->setCurrentIndex(-1);
+            m_summaryLabel->setText(match.warning);
+            m_modeCombo->clear();
+            clearControlTabs();
+            return;
+        }
+    } else if (previous.isValid()) {
+        match = V4L2Camera::matchDevice(previous, devices, enumError);
+    }
+    if (!match.hasDevice())
+        match = V4L2Camera::matchDevice({}, devices, enumError);
+
+    m_deviceCombo->setCurrentIndex(indexForDevice(match.device));
     onDeviceChanged(m_deviceCombo->currentIndex());
 }
 
@@ -241,9 +260,12 @@ void V4L2SettingsDialog::onDeviceChanged(int index)
     const auto modes = device.enumerateCaptureModes(&error);
     populateModes(modes);
 
+    const bool applyLoadedValues = m_applyLoadedControlValues;
+    m_applyLoadedControlValues = false;
     auto queriedControls = device.queryControls(&error);
-    rebuildControls(queriedControls);
-    m_loadedControlValues.clear();
+    rebuildControls(queriedControls, applyLoadedValues);
+    if (applyLoadedValues)
+        m_loadedControlValues.clear();
     updateSummary();
 }
 
@@ -385,7 +407,7 @@ void V4L2SettingsDialog::populateModes(const QList<V4L2Camera::CaptureMode> &mod
     }
 }
 
-void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &controls)
+void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &controls, bool applyLoadedValues)
 {
     clearControlTabs();
     m_controls.clear();
@@ -407,7 +429,7 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
         if (control.isClassMarker() || control.isDisabled())
             continue;
 
-        if (m_loadedControlValues.contains(control.id))
+        if (applyLoadedValues && m_loadedControlValues.contains(control.id))
             control.currentValue = clampControlValue(control, m_loadedControlValues.value(control.id));
 
         m_controls.insert(control.id, control);

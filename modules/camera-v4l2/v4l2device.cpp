@@ -246,13 +246,32 @@ bool DeviceIdentity::exactMatch(const DeviceIdentity &other) const
         && deviceCaps == other.deviceCaps && usbVid == other.usbVid && usbPid == other.usbPid && serial == other.serial;
 }
 
+bool DeviceIdentity::stableMatch(const DeviceIdentity &other) const
+{
+    if (!isValid() || !other.isValid())
+        return false;
+    if (usbVid.isEmpty() || usbPid.isEmpty() || serial.isEmpty())
+        return false;
+    return usbVid == other.usbVid && usbPid == other.usbPid && serial == other.serial;
+}
+
 bool DeviceIdentity::weakMatch(const DeviceIdentity &other) const
 {
     if (!isValid() || !other.isValid())
         return false;
-    if (!usbVid.isEmpty() && !usbPid.isEmpty() && !serial.isEmpty())
-        return usbVid == other.usbVid && usbPid == other.usbPid && serial == other.serial && card == other.card;
-    return driver == other.driver && card == other.card && busInfo == other.busInfo;
+    if (stableMatch(other))
+        return false;
+    return !busInfo.isEmpty() && driver == other.driver && card == other.card && busInfo == other.busInfo;
+}
+
+bool DeviceMatch::hasDevice() const
+{
+    return device.isValid() && kind != DeviceMatchKind::None;
+}
+
+bool DeviceMatch::trustedForSavedSettings() const
+{
+    return kind == DeviceMatchKind::Exact || kind == DeviceMatchKind::Stable || kind == DeviceMatchKind::Weak;
 }
 
 QVariantHash DeviceIdentity::toVariant() const
@@ -578,45 +597,69 @@ QList<DeviceIdentity> enumerateDevices(QString *error)
     return devices;
 }
 
-std::optional<DeviceIdentity> findDevice(const DeviceIdentity &wanted, QString *warning)
+DeviceMatch matchDevice(const DeviceIdentity &wanted, const QList<DeviceIdentity> &devices, const QString &enumError)
 {
-    QString enumError;
-    const auto devices = enumerateDevices(&enumError);
+    DeviceMatch match;
     if (!wanted.isValid()) {
-        if (devices.isEmpty()) {
-            if (warning != nullptr)
-                *warning = enumError;
-            return std::nullopt;
+        if (!devices.isEmpty()) {
+            match.device = devices.first();
+            match.kind = DeviceMatchKind::FirstAvailable;
+        } else {
+            match.warning = enumError;
         }
-        return devices.first();
+        return match;
     }
 
     for (const auto &device : devices) {
-        if (wanted.exactMatch(device))
-            return device;
+        if (wanted.exactMatch(device)) {
+            match.device = device;
+            match.kind = DeviceMatchKind::Exact;
+            return match;
+        }
     }
 
     for (const auto &device : devices) {
-        if (!wanted.devicePath.isEmpty() && wanted.devicePath == device.devicePath) {
-            if (warning != nullptr)
-                *warning = QStringLiteral("Using %1 by path; saved camera identity did not match exactly.")
-                               .arg(device.devicePath);
-            return device;
+        if (wanted.stableMatch(device)) {
+            match.device = device;
+            match.kind = DeviceMatchKind::Stable;
+            return match;
         }
     }
 
     for (const auto &device : devices) {
         if (wanted.weakMatch(device)) {
-            if (warning != nullptr)
-                *warning = QStringLiteral("Using weak V4L2 camera identity match for %1. Check the selected device.")
-                               .arg(device.displayName());
-            return device;
+            match.device = device;
+            match.kind = DeviceMatchKind::Weak;
+            match.warning = QStringLiteral("Using weak V4L2 camera identity match for %1. Check the selected device.")
+                                .arg(device.displayName());
+            return match;
         }
     }
 
+    for (const auto &device : devices) {
+        if (!wanted.devicePath.isEmpty() && wanted.devicePath == device.devicePath) {
+            match.device = device;
+            match.kind = DeviceMatchKind::Path;
+            match.warning = QStringLiteral("Using %1 by path; saved camera identity did not match exactly.")
+                                .arg(device.devicePath);
+            return match;
+        }
+    }
+
+    match.warning = enumError.isEmpty() ? QStringLiteral("Saved V4L2 camera was not found.") : enumError;
+    return match;
+}
+
+std::optional<DeviceIdentity> findDevice(const DeviceIdentity &wanted, QString *warning)
+{
+    QString enumError;
+    const auto devices = enumerateDevices(&enumError);
+    const auto match = matchDevice(wanted, devices, enumError);
     if (warning != nullptr)
-        *warning = enumError.isEmpty() ? QStringLiteral("Saved V4L2 camera was not found.") : enumError;
-    return std::nullopt;
+        *warning = match.warning;
+    if (!match.hasDevice())
+        return std::nullopt;
+    return match.device;
 }
 
 Device::Device()

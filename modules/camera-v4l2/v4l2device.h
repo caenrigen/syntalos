@@ -44,9 +44,28 @@ struct DeviceIdentity {
     QString displayName() const;
     QString stableKey() const;
     bool exactMatch(const DeviceIdentity &other) const;
+    bool stableMatch(const DeviceIdentity &other) const;
     bool weakMatch(const DeviceIdentity &other) const;
     QVariantHash toVariant() const;
     static DeviceIdentity fromVariant(const QVariantHash &data);
+};
+
+enum class DeviceMatchKind {
+    None,
+    FirstAvailable,
+    Exact,
+    Stable,
+    Weak,
+    Path
+};
+
+struct DeviceMatch {
+    DeviceIdentity device;
+    DeviceMatchKind kind = DeviceMatchKind::None;
+    QString warning;
+
+    bool hasDevice() const;
+    bool trustedForSavedSettings() const;
 };
 
 struct CaptureMode {
@@ -126,6 +145,10 @@ QSet<quint32> autoControlIds();
 bool autoControlEnabled(quint32 id, qint64 value);
 bool isManualDependentActive(quint32 id, const QHash<quint32, qint64> &values);
 QList<DeviceIdentity> enumerateDevices(QString *error = nullptr);
+DeviceMatch matchDevice(
+    const DeviceIdentity &wanted,
+    const QList<DeviceIdentity> &devices,
+    const QString &enumError = QString());
 std::optional<DeviceIdentity> findDevice(const DeviceIdentity &wanted, QString *warning = nullptr);
 
 class Device
