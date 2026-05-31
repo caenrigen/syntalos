@@ -512,6 +512,17 @@ QString manualModeReapplyNote(const V4L2Camera::ControlInfo &control)
     return {};
 }
 
+QString wrappedTooltip(const QStringList &lines)
+{
+    QStringList escapedLines;
+    escapedLines.reserve(lines.size());
+    for (const auto &line : lines)
+        escapedLines.append(line.toHtmlEscaped());
+
+    return QStringLiteral("<qt><div style=\"width: 520px; white-space: normal;\">%1</div></qt>")
+        .arg(escapedLines.join(QStringLiteral("<br/>")));
+}
+
 QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &disabledReason = QString())
 {
     QStringList lines;
@@ -545,7 +556,14 @@ QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &di
     if (!manualReapplyNote.isEmpty())
         lines << QStringLiteral("Manual transition: %1").arg(manualReapplyNote);
 
-    return lines.join(QLatin1Char('\n'));
+    return wrappedTooltip(lines);
+}
+
+QString controlCommitInfoText()
+{
+    return QStringLiteral(
+        "Device writes: sliders on release; spinboxes/text boxes on Enter or focus-out; menus/checkboxes immediately; "
+        "Trigger/Reset on click.");
 }
 
 bool shouldUseSlider(const V4L2Camera::ControlInfo &control)
@@ -1137,7 +1155,10 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
             auto *buttonsRow = new QWidget(page);
             auto *buttonsLayout = new QHBoxLayout(buttonsRow);
             buttonsLayout->setContentsMargins(0, 0, 0, 4);
-            buttonsLayout->addStretch();
+            auto *commitInfoLabel = new QLabel(controlCommitInfoText(), buttonsRow);
+            commitInfoLabel->setWordWrap(true);
+            commitInfoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            buttonsLayout->addWidget(commitInfoLabel, 1);
             auto *readButton = new QPushButton(QStringLiteral("Read Tab"), buttonsRow);
             auto *resetButton = new QPushButton(QStringLiteral("Reset Tab"), buttonsRow);
             buttonsLayout->addWidget(readButton);
