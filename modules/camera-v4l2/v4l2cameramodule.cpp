@@ -369,6 +369,7 @@ public:
 
         uint64_t frameCount = 0;
         uint64_t invalidFrameCount = 0;
+        uint64_t droppedFrameCount = 0;
         uint64_t sequenceGapCount = 0;
         std::optional<quint32> lastSequence;
         std::optional<nanoseconds_t> lastDriverTimestamp;
@@ -416,6 +417,11 @@ public:
                     if (errno == EAGAIN)
                         break;
                     if (errno == ENODEV || errno == EIO) {
+                        // Keep EIO fatal for now. V4L2 permits drivers to report transient capture
+                        // errors either as EIO here or as V4L2_BUF_FLAG_ERROR on a dequeued buffer.
+                        // If EIO becomes common with supported cameras, add bounded stream recovery:
+                        // STREAMOFF, requeue all mmap buffers, STREAMON, reset sequence/timestamp state,
+                        // and abort only after repeated recovery failures.
                         raiseError(QStringLiteral("V4L2 camera returned a capture error: %1").arg(errnoString()));
                         m_running = false;
                         break;
@@ -451,62 +457,67 @@ public:
                 }
                 lastSequence = buf.sequence;
 
-                cv::Mat image;
-                const auto bytesUsed = buf.bytesused == 0 ? buffers[buf.index].length : static_cast<size_t>(buf.bytesused);
-                const auto *data = static_cast<const quint8 *>(buffers[buf.index].start);
-                if (!decoder.decode(data, bytesUsed, &image, &error)) {
-                    invalidFrameCount++;
-                    logWarning(m_log, QStringLiteral("Failed to decode V4L2 frame: %1").arg(error));
-                } else if (image.cols != m_effectiveMode.width || image.rows != m_effectiveMode.height) {
-                    invalidFrameCount++;
-                    logWarning(
-                        m_log,
-                        QStringLiteral("Decoded V4L2 frame has unexpected dimensions %1x%2.")
-                            .arg(image.cols)
-                            .arg(image.rows));
+                if ((buf.flags & V4L2_BUF_FLAG_ERROR) != 0) {
+                    droppedFrameCount++;
+                    logWarning(m_log, QStringLiteral("Dropping V4L2 frame marked with V4L2_BUF_FLAG_ERROR."));
                 } else {
-                    const bool timestampMonotonic =
-                        (buf.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-                    const auto driverTimestamp = v4l2TimestampToNsec(buf.timestamp);
-                    microseconds_t frameTime = nsecToUsec(dequeueMasterNs);
+                    cv::Mat image;
+                    const auto bytesUsed = buf.bytesused == 0 ? buffers[buf.index].length : static_cast<size_t>(buf.bytesused);
+                    const auto *data = static_cast<const quint8 *>(buffers[buf.index].start);
+                    if (!decoder.decode(data, bytesUsed, &image, &error)) {
+                        invalidFrameCount++;
+                        logWarning(m_log, QStringLiteral("Failed to decode V4L2 frame: %1").arg(error));
+                    } else if (image.cols != m_effectiveMode.width || image.rows != m_effectiveMode.height) {
+                        invalidFrameCount++;
+                        logWarning(
+                            m_log,
+                            QStringLiteral("Decoded V4L2 frame has unexpected dimensions %1x%2.")
+                                .arg(image.cols)
+                                .arg(image.rows));
+                    } else {
+                        const bool timestampMonotonic =
+                            (buf.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+                        const auto driverTimestamp = v4l2TimestampToNsec(buf.timestamp);
+                        microseconds_t frameTime = nsecToUsec(dequeueMasterNs);
 
-                    if (timestampMonotonic && useDriverTimestamps && driverTimestamp.count() > 0) {
-                        if (!driverOffsetKnown) {
-                            driverToMasterOffset = dequeueMasterNs - driverTimestamp;
-                            driverOffsetKnown = true;
+                        if (timestampMonotonic && useDriverTimestamps && driverTimestamp.count() > 0) {
+                            if (!driverOffsetKnown) {
+                                driverToMasterOffset = dequeueMasterNs - driverTimestamp;
+                                driverOffsetKnown = true;
+                            }
+
+                            bool sane = true;
+                            if (lastDriverTimestamp.has_value()) {
+                                const auto delta = driverTimestamp - *lastDriverTimestamp;
+                                if (delta.count() <= 0 || (expectedFrameNs.count() > 0 && delta > expectedFrameNs * 20))
+                                    sane = false;
+                            }
+
+                            if (sane) {
+                                frameTime = nsecToUsec(driverTimestamp + driverToMasterOffset);
+                                clockSync->processTimestamp(frameTime, nsecToUsec(driverTimestamp));
+                                lastDriverTimestamp = driverTimestamp;
+                            } else {
+                                useDriverTimestamps = false;
+                                warnOnce(
+                                    &m_warnedTimestampFallback,
+                                    QStringLiteral("V4L2 Timestamp Fallback"),
+                                    QStringLiteral("Driver timestamps became implausible; using Syntalos dequeue time."));
+                            }
                         }
 
-                        bool sane = true;
-                        if (lastDriverTimestamp.has_value()) {
-                            const auto delta = driverTimestamp - *lastDriverTimestamp;
-                            if (delta.count() <= 0 || (expectedFrameNs.count() > 0 && delta > expectedFrameNs * 20))
-                                sane = false;
+                        if (!timestampMonotonic || !useDriverTimestamps) {
+                            frameTime = nsecToUsec(dequeueMasterNs);
+                            clockSync->processTimestamp(frameTime, frameTime);
                         }
 
-                        if (sane) {
-                            frameTime = nsecToUsec(driverTimestamp + driverToMasterOffset);
-                            clockSync->processTimestamp(frameTime, nsecToUsec(driverTimestamp));
-                            lastDriverTimestamp = driverTimestamp;
-                        } else {
-                            useDriverTimestamps = false;
-                            warnOnce(
-                                &m_warnedTimestampFallback,
-                                QStringLiteral("V4L2 Timestamp Fallback"),
-                                QStringLiteral("Driver timestamps became implausible; using Syntalos dequeue time."));
-                        }
+                        if (lastFrameTime.has_value() && frameTime <= *lastFrameTime)
+                            frameTime = *lastFrameTime + microseconds_t(1);
+                        lastFrameTime = frameTime;
+
+                        m_outStream->push(Frame(image, frameCount++, frameTime));
+                        invalidFrameCount = 0;
                     }
-
-                    if (!timestampMonotonic || !useDriverTimestamps) {
-                        frameTime = nsecToUsec(dequeueMasterNs);
-                        clockSync->processTimestamp(frameTime, frameTime);
-                    }
-
-                    if (lastFrameTime.has_value() && frameTime <= *lastFrameTime)
-                        frameTime = *lastFrameTime + microseconds_t(1);
-                    lastFrameTime = frameTime;
-
-                    m_outStream->push(Frame(image, frameCount++, frameTime));
-                    invalidFrameCount = 0;
                 }
 
                 if (xioctl(device.fd(), VIDIOC_QBUF, &buf) < 0) {
@@ -527,7 +538,11 @@ public:
             if (elapsed.count() >= 2000) {
                 const auto frames = frameCount - lastStatusFrame;
                 const double fps = static_cast<double>(frames) * 1000.0 / static_cast<double>(elapsed.count());
-                statusMessage(QStringLiteral("Capturing %1 fps, sequence gaps %2").arg(fps, 0, 'f', 1).arg(sequenceGapCount));
+                statusMessage(
+                    QStringLiteral("Capturing %1 fps, sequence gaps %2, dropped %3")
+                        .arg(fps, 0, 'f', 1)
+                        .arg(sequenceGapCount)
+                        .arg(droppedFrameCount));
                 lastStatusFrame = frameCount;
                 lastStatusTime = now;
             }
