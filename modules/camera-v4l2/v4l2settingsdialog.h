@@ -11,6 +11,7 @@
 #include <QDialog>
 #include <QHash>
 #include <QList>
+#include <QSet>
 
 class QCheckBox;
 class QComboBox;
@@ -36,6 +37,7 @@ public:
     void setRunning(bool running);
     void setEffectiveMode(const V4L2Camera::CaptureMode &mode);
     void updateControlReadback(quint32 id, qint64 value);
+    void updateControls(const QList<V4L2Camera::ControlInfo> &controls, const QSet<quint32> &affectedIds);
     void replaceControls(const QList<V4L2Camera::ControlInfo> &controls);
     void refreshDevices();
 

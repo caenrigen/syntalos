@@ -702,6 +702,56 @@ private:
         }
     }
 
+    static bool sameMenuStructure(
+        const QList<V4L2Camera::MenuEntry> &a,
+        const QList<V4L2Camera::MenuEntry> &b)
+    {
+        if (a.size() != b.size())
+            return false;
+
+        for (int i = 0; i < a.size(); ++i) {
+            if (a.at(i).value != b.at(i).value || a.at(i).name != b.at(i).name)
+                return false;
+        }
+
+        return true;
+    }
+
+    static bool sameControlStructure(
+        const V4L2Camera::ControlInfo &a,
+        const V4L2Camera::ControlInfo &b)
+    {
+        return a.id == b.id && a.name == b.name && a.controlClass == b.controlClass && a.type == b.type
+            && a.minimum == b.minimum && a.maximum == b.maximum && a.step == b.step
+            && a.defaultValue == b.defaultValue && a.supported == b.supported && a.isDisabled() == b.isDisabled()
+            && sameMenuStructure(a.menu, b.menu);
+    }
+
+    static bool controlInventoryChanged(
+        const QHash<quint32, V4L2Camera::ControlInfo> &oldControls,
+        const QList<V4L2Camera::ControlInfo> &newControls)
+    {
+        QSet<quint32> seenIds;
+        for (const auto &control : newControls) {
+            if (control.isClassMarker())
+                continue;
+
+            seenIds.insert(control.id);
+            const auto oldIt = oldControls.constFind(control.id);
+            if (oldIt == oldControls.constEnd())
+                return true;
+            if (!sameControlStructure(oldIt.value(), control))
+                return true;
+        }
+
+        for (auto it = oldControls.constBegin(); it != oldControls.constEnd(); ++it) {
+            if (!seenIds.contains(it.key()))
+                return true;
+        }
+
+        return false;
+    }
+
     void applyPendingControlWrites(V4L2Camera::Device &device)
     {
         QHash<quint32, qint64> pending;
@@ -719,7 +769,8 @@ private:
         if (pending.isEmpty() && pendingButtons.isEmpty())
             return;
 
-        bool needControlRefresh = false;
+        QSet<quint32> affectedRefreshIds;
+        const auto dependencyTable = V4L2Camera::autoDependencyTable();
         for (auto it = pending.constBegin(); it != pending.constEnd(); ++it) {
             if (!m_controlMap.contains(it.key()))
                 continue;
@@ -750,8 +801,10 @@ private:
                         .arg(result.readbackValue)
                         .arg(result.requestedValue));
             }
-            if (V4L2Camera::autoControlIds().contains(control.id))
-                needControlRefresh = true;
+
+            affectedRefreshIds.insert(control.id);
+            for (const auto dependentId : dependencyTable.value(control.id))
+                affectedRefreshIds.insert(dependentId);
         }
 
         for (const auto id : pendingButtons) {
@@ -769,18 +822,35 @@ private:
             m_desiredControlValues = desired;
         }
 
-        if (needControlRefresh) {
+        if (!affectedRefreshIds.isEmpty()) {
             auto controls = device.queryControls(nullptr);
+            const bool inventoryChanged = controlInventoryChanged(m_controlMap, controls);
             updateControlMap(controls);
             {
                 QMutexLocker locker(&m_controlMutex);
-                for (const auto &control : controls)
-                    m_desiredControlValues[control.id] = control.currentValue;
+                if (inventoryChanged) {
+                    for (const auto &control : controls) {
+                        if (!control.isClassMarker())
+                            m_desiredControlValues[control.id] = control.currentValue;
+                    }
+                } else {
+                    for (const auto &control : controls) {
+                        if (affectedRefreshIds.contains(control.id))
+                            m_desiredControlValues[control.id] = control.currentValue;
+                    }
+                }
             }
-            QMetaObject::invokeMethod(
-                m_settingsDialog,
-                [this, controls]() { m_settingsDialog->replaceControls(controls); },
-                Qt::QueuedConnection);
+            if (inventoryChanged) {
+                QMetaObject::invokeMethod(
+                    m_settingsDialog,
+                    [this, controls]() { m_settingsDialog->replaceControls(controls); },
+                    Qt::QueuedConnection);
+            } else {
+                QMetaObject::invokeMethod(
+                    m_settingsDialog,
+                    [this, controls, affectedRefreshIds]() { m_settingsDialog->updateControls(controls, affectedRefreshIds); },
+                    Qt::QueuedConnection);
+            }
         }
     }
 

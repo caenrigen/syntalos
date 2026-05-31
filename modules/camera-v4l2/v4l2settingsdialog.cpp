@@ -258,6 +258,30 @@ void V4L2SettingsDialog::updateControlReadback(quint32 id, qint64 value)
     updateDependencyStates();
 }
 
+void V4L2SettingsDialog::updateControls(const QList<V4L2Camera::ControlInfo> &controls, const QSet<quint32> &affectedIds)
+{
+    if (affectedIds.isEmpty())
+        return;
+
+    QHash<quint32, V4L2Camera::ControlInfo> queriedControls;
+    for (const auto &control : controls) {
+        if (!control.isClassMarker() && !control.isDisabled())
+            queriedControls.insert(control.id, control);
+    }
+
+    for (const auto id : affectedIds) {
+        const auto it = queriedControls.constFind(id);
+        if (it == queriedControls.constEnd() || !m_controlWidgets.contains(id))
+            continue;
+
+        m_controls[id] = it.value();
+        m_desiredValues[id] = it->currentValue;
+        setControlWidgetValue(id, it->currentValue);
+    }
+
+    updateDependencyStates();
+}
+
 void V4L2SettingsDialog::replaceControls(const QList<V4L2Camera::ControlInfo> &controls)
 {
     rebuildControls(controls);
