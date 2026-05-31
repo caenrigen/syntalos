@@ -1154,9 +1154,6 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
     widgets.nameLabel = nameLabel;
     grid->addWidget(nameLabel, 0, 0);
 
-    widgets.stateLabel = new QLabel(row);
-    widgets.stateLabel->setMinimumWidth(70);
-
     const auto unsupportedReason = unsupportedControlReason(control);
     if (!unsupportedReason.isEmpty()) {
         auto *label = new QLabel(unsupportedReason, row);
@@ -1285,8 +1282,7 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
             handleControlEdited(id, m_controls.value(id).defaultValue);
     });
 
-    grid->addWidget(widgets.stateLabel, 0, 2);
-    grid->addWidget(widgets.resetButton, 0, 3);
+    grid->addWidget(widgets.resetButton, 0, 2);
     m_controlWidgets.insert(control.id, widgets);
     setControlWidgetValue(control.id, control.currentValue);
     updateControlPresentation(control.id);
@@ -1366,8 +1362,6 @@ void V4L2SettingsDialog::updateControlPresentation(quint32 id, const QString &di
     applyTooltip(widgets.comboBox);
     applyTooltip(widgets.checkBox);
     applyTooltip(widgets.button);
-    applyTooltip(widgets.stateLabel);
-
     if (widgets.resetButton != nullptr) {
         widgets.resetButton->setText(QStringLiteral("Reset"));
         widgets.resetButton->setToolTip(
@@ -1429,21 +1423,6 @@ void V4L2SettingsDialog::updateDependencyStates()
         }
         if (it->resetButton != nullptr)
             it->resetButton->setEnabled(control.restorable() && !autoDisabled && !isGrabbed(control) && modified);
-        if (it->stateLabel != nullptr) {
-            if (!unsupportedControlReason(control).isEmpty())
-                it->stateLabel->setText(QStringLiteral("Unsupported"));
-            else if (control.isReadOnly())
-                it->stateLabel->setText(QStringLiteral("Read-only"));
-            else if (autoDisabled)
-                it->stateLabel->setText(QStringLiteral("Auto"));
-            else if (isGrabbed(control))
-                it->stateLabel->setText(QStringLiteral("Locked"));
-            else if (control.isButton() && !m_running)
-                it->stateLabel->setText(QStringLiteral("Live only"));
-            else
-                it->stateLabel->clear();
-        }
-
         QString disabledReason;
         if (autoDisabled)
             disabledReason = autoDisabledReason(id, m_controls, m_desiredValues);

@@ -66,7 +66,6 @@ private:
         QCheckBox *checkBox = nullptr;
         QPushButton *button = nullptr;
         QPushButton *resetButton = nullptr;
-        QLabel *stateLabel = nullptr;
     };
 
     QTabWidget *m_tabs;
