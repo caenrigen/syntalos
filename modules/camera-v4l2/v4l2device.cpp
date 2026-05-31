@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
+#include <numeric>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -38,6 +39,8 @@ extern "C" {
 
 namespace
 {
+
+using FrameInterval = QPair<quint32, quint32>;
 
 int xioctl(int fd, unsigned long request, void *arg)
 {
@@ -140,9 +143,259 @@ void addMode(
     modes->append(mode);
 }
 
-QList<QPair<quint32, quint32>> frameIntervalsForSize(int fd, quint32 fourcc, int width, int height)
+void addFrameSize(QList<QSize> *sizes, QSet<QString> *seen, int width, int height)
 {
-    QList<QPair<quint32, quint32>> intervals;
+    if (width <= 0 || height <= 0)
+        return;
+
+    const auto key = QStringLiteral("%1x%2").arg(width).arg(height);
+    if (seen->contains(key))
+        return;
+
+    seen->insert(key);
+    sizes->append(QSize(width, height));
+}
+
+bool frameSizeMatchesStep(quint32 value, quint32 min, quint32 max, quint32 step)
+{
+    if (value < min || value > max)
+        return false;
+    if (step == 0)
+        return true;
+    return (value - min) % step == 0;
+}
+
+QList<QSize> frameSizesForStepwise(const v4l2_frmsize_stepwise &range)
+{
+    QList<QSize> sizes;
+    QSet<QString> seen;
+
+    const auto addIfValid = [&sizes, &seen, &range](quint32 width, quint32 height) {
+        if (!frameSizeMatchesStep(width, range.min_width, range.max_width, range.step_width))
+            return;
+        if (!frameSizeMatchesStep(height, range.min_height, range.max_height, range.step_height))
+            return;
+        if (width > static_cast<quint32>(std::numeric_limits<int>::max())
+            || height > static_cast<quint32>(std::numeric_limits<int>::max()))
+            return;
+
+        addFrameSize(&sizes, &seen, static_cast<int>(width), static_cast<int>(height));
+    };
+
+    addIfValid(range.min_width, range.min_height);
+
+    static const QSize commonSizes[] = {
+        QSize(128, 96),
+        QSize(320, 240),
+        QSize(352, 288),
+        QSize(360, 280),
+        QSize(544, 480),
+        QSize(576, 480),
+        QSize(640, 480),
+        QSize(720, 480),
+        QSize(800, 600),
+        QSize(960, 720),
+        QSize(1024, 768),
+        QSize(1280, 720),
+        QSize(1280, 960),
+        QSize(1440, 1080),
+        QSize(1600, 1200),
+        QSize(1920, 1080),
+        QSize(1920, 1200),
+        QSize(2048, 1152),
+        QSize(2048, 1536),
+        QSize(2560, 1440),
+        QSize(3840, 2160),
+        QSize(4096, 3072),
+        QSize(7680, 4320),
+        QSize(7680, 4800),
+    };
+
+    for (const auto &size : commonSizes)
+        addIfValid(static_cast<quint32>(size.width()), static_cast<quint32>(size.height()));
+
+    addIfValid(range.max_width, range.max_height);
+
+    return sizes;
+}
+
+long double intervalSeconds(const FrameInterval &interval)
+{
+    return static_cast<long double>(interval.first) / static_cast<long double>(interval.second);
+}
+
+double intervalFps(const FrameInterval &interval)
+{
+    return static_cast<double>(interval.second) / static_cast<double>(interval.first);
+}
+
+void addFrameInterval(QList<FrameInterval> *intervals, QSet<QString> *seen, quint64 numerator, quint64 denominator)
+{
+    if (numerator == 0 || denominator == 0)
+        return;
+
+    const auto divisor = std::gcd(numerator, denominator);
+    numerator /= divisor;
+    denominator /= divisor;
+
+    if (numerator > std::numeric_limits<quint32>::max() || denominator > std::numeric_limits<quint32>::max())
+        return;
+
+    const auto key = QStringLiteral("%1/%2").arg(numerator).arg(denominator);
+    if (seen->contains(key))
+        return;
+
+    seen->insert(key);
+    intervals->append({static_cast<quint32>(numerator), static_cast<quint32>(denominator)});
+}
+
+FrameInterval intervalForFps(long double fps)
+{
+    if (fps <= 0.0L)
+        return {};
+
+    const auto rounded = std::llround(fps);
+    if (rounded > 0 && rounded <= std::numeric_limits<quint32>::max()
+        && std::fabsl(fps - static_cast<long double>(rounded)) < 0.0001L)
+        return {1, static_cast<quint32>(rounded)};
+
+    struct FpsPreset {
+        long double fps;
+        quint32 numerator;
+        quint32 denominator;
+    };
+
+    static const FpsPreset presets[] = {
+        {23.976L, 1001, 24000},
+        {29.970L, 1001, 30000},
+        {59.940L, 1001, 60000},
+        {119.880L, 1001, 120000},
+    };
+    for (const auto &preset : presets) {
+        if (std::fabsl(fps - preset.fps) < 0.01L)
+            return {preset.numerator, preset.denominator};
+    }
+
+    constexpr quint64 denominator = 1000000;
+    const auto numerator = static_cast<quint64>(std::max<long long>(1, std::llround(denominator / fps)));
+    const auto divisor = std::gcd(numerator, denominator);
+    return {static_cast<quint32>(numerator / divisor), static_cast<quint32>(denominator / divisor)};
+}
+
+FrameInterval intervalForStepwiseFps(long double fps, const v4l2_frmival_stepwise &range, bool alignToStep)
+{
+    const FrameInterval minInterval = {range.min.numerator, range.min.denominator};
+    const FrameInterval maxInterval = {range.max.numerator, range.max.denominator};
+    const auto minSeconds = std::min(intervalSeconds(minInterval), intervalSeconds(maxInterval));
+    const auto maxSeconds = std::max(intervalSeconds(minInterval), intervalSeconds(maxInterval));
+
+    auto seconds = 1.0L / fps;
+    if (alignToStep && range.step.numerator > 0 && range.step.denominator > 0) {
+        const auto stepSeconds = static_cast<long double>(range.step.numerator)
+            / static_cast<long double>(range.step.denominator);
+        if (stepSeconds > 0.0L) {
+            const auto steps = std::llround((seconds - minSeconds) / stepSeconds);
+            seconds = minSeconds + static_cast<long double>(steps) * stepSeconds;
+        }
+    }
+
+    seconds = std::clamp(seconds, minSeconds, maxSeconds);
+    return intervalForFps(1.0L / seconds);
+}
+
+QList<double> fpsSamplesForRange(double minFps, double maxFps)
+{
+    QList<double> samples;
+    if (minFps <= 0.0 || maxFps <= 0.0)
+        return samples;
+    if (minFps > maxFps)
+        std::swap(minFps, maxFps);
+
+    samples.append(minFps);
+
+    double current = std::floor(minFps);
+    if (current < 1.0)
+        current = 1.0;
+
+    while (current < maxFps) {
+        if (current < 20.0)
+            current += 1.0;
+        else if (current < 100.0)
+            current += 10.0;
+        else if (current < 1000.0)
+            current += 50.0;
+        else
+            current += 100.0;
+
+        if (current > minFps && current < maxFps)
+            samples.append(current);
+    }
+
+    samples.append(maxFps);
+    return samples;
+}
+
+QList<FrameInterval> frameIntervalsForStepwise(const v4l2_frmival_stepwise &range, bool alignToStep)
+{
+    QList<FrameInterval> intervals;
+    QSet<QString> seen;
+
+    const FrameInterval minInterval = {range.min.numerator, range.min.denominator};
+    const FrameInterval maxInterval = {range.max.numerator, range.max.denominator};
+    if (minInterval.first == 0 || minInterval.second == 0 || maxInterval.first == 0 || maxInterval.second == 0)
+        return intervals;
+
+    addFrameInterval(&intervals, &seen, minInterval.first, minInterval.second);
+    addFrameInterval(&intervals, &seen, maxInterval.first, maxInterval.second);
+
+    const auto minFps = std::min(intervalFps(minInterval), intervalFps(maxInterval));
+    const auto maxFps = std::max(intervalFps(minInterval), intervalFps(maxInterval));
+
+    static const FrameInterval commonIntervals[] = {
+        {1,    1     },
+        {1,    2     },
+        {1,    5     },
+        {1,    10    },
+        {1,    15    },
+        {1,    20    },
+        {1,    24    },
+        {1001, 24000 },
+        {1,    25    },
+        {1001, 30000 },
+        {1,    30    },
+        {1,    50    },
+        {1001, 60000 },
+        {1,    60    },
+        {1,    90    },
+        {1001, 120000},
+        {1,    120   },
+        {1,    240   },
+    };
+
+    const auto addTargetFps = [&intervals, &seen, &range, alignToStep, minFps, maxFps](long double fps) {
+        if (fps < static_cast<long double>(minFps) - 0.001L || fps > static_cast<long double>(maxFps) + 0.001L)
+            return;
+        const auto interval = intervalForStepwiseFps(fps, range, alignToStep);
+        addFrameInterval(&intervals, &seen, interval.first, interval.second);
+    };
+
+    for (const auto &interval : commonIntervals)
+        addTargetFps(intervalFps(interval));
+
+    for (const auto fps : fpsSamplesForRange(minFps, maxFps))
+        addTargetFps(fps);
+
+    std::sort(intervals.begin(), intervals.end(), [](const FrameInterval &a, const FrameInterval &b) {
+        return intervalFps(a) > intervalFps(b);
+    });
+
+    return intervals;
+}
+
+QList<FrameInterval> frameIntervalsForSize(int fd, quint32 fourcc, int width, int height)
+{
+    QList<FrameInterval> intervals;
+    QSet<QString> seen;
 
     v4l2_frmivalenum fival = {};
     fival.pixel_format = fourcc;
@@ -152,20 +405,15 @@ QList<QPair<quint32, quint32>> frameIntervalsForSize(int fd, quint32 fourcc, int
     for (fival.index = 0; xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &fival) == 0; ++fival.index) {
         if (fival.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
             if (fival.discrete.numerator > 0 && fival.discrete.denominator > 0)
-                intervals.append({fival.discrete.numerator, fival.discrete.denominator});
+                addFrameInterval(&intervals, &seen, fival.discrete.numerator, fival.discrete.denominator);
         } else if (fival.type == V4L2_FRMIVAL_TYPE_STEPWISE || fival.type == V4L2_FRMIVAL_TYPE_CONTINUOUS) {
-            if (fival.stepwise.min.numerator > 0 && fival.stepwise.min.denominator > 0)
-                intervals.append({fival.stepwise.min.numerator, fival.stepwise.min.denominator});
-            if (fival.stepwise.max.numerator > 0 && fival.stepwise.max.denominator > 0
-                && (fival.stepwise.max.numerator != fival.stepwise.min.numerator
-                    || fival.stepwise.max.denominator != fival.stepwise.min.denominator))
-                intervals.append({fival.stepwise.max.numerator, fival.stepwise.max.denominator});
+            intervals = frameIntervalsForStepwise(fival.stepwise, fival.type == V4L2_FRMIVAL_TYPE_STEPWISE);
             break;
         }
     }
 
     if (intervals.isEmpty())
-        intervals.append({1, 30});
+        addFrameInterval(&intervals, &seen, 1, 30);
     return intervals;
 }
 
@@ -773,10 +1021,7 @@ QList<CaptureMode> Device::enumerateCaptureModes(QString *error) const
                 for (const auto &interval : intervals)
                     addMode(&modes, &seen, fmt.pixelformat, description, fmt.flags, width, height, interval.first, interval.second);
             } else if (fsize.type == V4L2_FRMSIZE_TYPE_STEPWISE || fsize.type == V4L2_FRMSIZE_TYPE_CONTINUOUS) {
-                const QList<QSize> sizes = {
-                    QSize(static_cast<int>(fsize.stepwise.min_width), static_cast<int>(fsize.stepwise.min_height)),
-                    QSize(static_cast<int>(fsize.stepwise.max_width), static_cast<int>(fsize.stepwise.max_height)),
-                };
+                const auto sizes = frameSizesForStepwise(fsize.stepwise);
                 for (const auto &size : sizes) {
                     const auto intervals = frameIntervalsForSize(m_fd, fmt.pixelformat, size.width(), size.height());
                     for (const auto &interval : intervals)
