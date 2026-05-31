@@ -1184,8 +1184,28 @@ bool FrameDecoder::decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QS
     }
 
     av_packet_unref(m_packet);
-    m_packet->data = const_cast<uint8_t *>(data);
-    m_packet->size = static_cast<int>(std::min<size_t>(size, std::numeric_limits<int>::max()));
+    if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        if (error != nullptr)
+            *error = QStringLiteral("MJPEG frame is too large for FFmpeg packet decoding.");
+        return false;
+    }
+
+    constexpr size_t paddingSize = AV_INPUT_BUFFER_PADDING_SIZE;
+    if (size > m_mjpegInputBuffer.max_size() - paddingSize) {
+        if (error != nullptr)
+            *error = QStringLiteral("MJPEG frame is too large to pad for FFmpeg packet decoding.");
+        return false;
+    }
+
+    // FFmpeg bitstream readers may read past packet->size for optimized parsing.
+    // Compressed input must therefore be followed by AV_INPUT_BUFFER_PADDING_SIZE
+    // zero bytes; V4L2's mmap buffer only guarantees bytesused valid payload bytes.
+    m_mjpegInputBuffer.resize(size + paddingSize);
+    std::memcpy(m_mjpegInputBuffer.data(), data, size);
+    std::memset(m_mjpegInputBuffer.data() + size, 0, paddingSize);
+
+    m_packet->data = m_mjpegInputBuffer.data();
+    m_packet->size = static_cast<int>(size);
 
     int ret = avcodec_send_packet(m_codecCtx, m_packet);
     m_packet->data = nullptr;

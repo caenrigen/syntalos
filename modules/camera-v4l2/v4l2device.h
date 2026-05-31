@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 struct AVCodecContext;
 struct AVFrame;
@@ -174,6 +175,7 @@ private:
     AVFrame *m_avFrame;
     AVPacket *m_packet;
     SwsContext *m_swsCtx;
+    std::vector<uint8_t> m_mjpegInputBuffer;
     bool m_configured;
 
     bool decodeGrey(const quint8 *data, size_t size, cv::Mat *out, QString *error);
