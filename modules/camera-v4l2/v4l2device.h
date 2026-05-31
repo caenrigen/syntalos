@@ -147,6 +147,7 @@ public:
     QList<ControlInfo> queryControls(QString *error) const;
     bool readControlValue(ControlInfo *control, QString *error) const;
     ControlWriteResult setControlValue(const ControlInfo &control, qint64 value) const;
+    bool triggerButtonControl(const ControlInfo &control, QString *error) const;
     bool applyCaptureMode(const CaptureMode &wanted, CaptureMode *effective, QString *error) const;
 
 private:

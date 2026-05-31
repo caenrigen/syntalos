@@ -44,6 +44,7 @@ public:
 
 Q_SIGNALS:
     void controlValueChanged(quint32 id, qint64 value);
+    void buttonControlTriggered(quint32 id);
 
 private Q_SLOTS:
     void onDeviceChanged(int index);

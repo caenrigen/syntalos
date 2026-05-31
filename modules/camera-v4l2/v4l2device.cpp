@@ -893,6 +893,44 @@ ControlWriteResult Device::setControlValue(const ControlInfo &control, qint64 va
     return result;
 }
 
+bool Device::triggerButtonControl(const ControlInfo &control, QString *error) const
+{
+    if (m_fd < 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("Device is not open.");
+        return false;
+    }
+    if (control.type != V4L2_CTRL_TYPE_BUTTON || !control.canWrite()) {
+        if (error != nullptr)
+            *error = QStringLiteral("Control '%1' is not a writable button control.").arg(control.name);
+        return false;
+    }
+
+    v4l2_ext_control extControl = {};
+    extControl.id = control.id;
+    extControl.value = 0;
+
+    v4l2_ext_controls extControls = {};
+    extControls.ctrl_class = V4L2_CTRL_ID2CLASS(control.id);
+    extControls.count = 1;
+    extControls.controls = &extControl;
+
+    bool writeOk = xioctl(m_fd, VIDIOC_S_EXT_CTRLS, &extControls) == 0;
+    if (!writeOk) {
+        v4l2_control legacy = {};
+        legacy.id = control.id;
+        legacy.value = 0;
+        writeOk = xioctl(m_fd, VIDIOC_S_CTRL, &legacy) == 0;
+    }
+
+    if (!writeOk) {
+        if (error != nullptr)
+            *error = QStringLiteral("Failed to trigger button control '%1': %2").arg(control.name, errnoString());
+        return false;
+    }
+    return true;
+}
+
 bool Device::applyCaptureMode(const CaptureMode &wanted, CaptureMode *effective, QString *error) const
 {
     if (m_fd < 0) {

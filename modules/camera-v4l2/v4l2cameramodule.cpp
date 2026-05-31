@@ -169,6 +169,7 @@ private:
     QMutex m_controlMutex;
     QHash<quint32, qint64> m_desiredControlValues;
     QHash<quint32, qint64> m_pendingControlWrites;
+    QList<quint32> m_pendingButtonControls;
 
 public:
     explicit V4L2CameraModule(QObject *parent = nullptr)
@@ -189,6 +190,12 @@ public:
             QMutexLocker locker(&m_controlMutex);
             m_desiredControlValues[id] = value;
             m_pendingControlWrites[id] = value;
+        });
+        connect(m_settingsDialog, &V4L2SettingsDialog::buttonControlTriggered, this, [this](quint32 id) {
+            if (m_stopped.load())
+                return;
+            QMutexLocker locker(&m_controlMutex);
+            m_pendingButtonControls.append(id);
         });
     }
 
@@ -215,7 +222,11 @@ public:
         m_warnedReadbackMismatch = false;
         m_warnedTimestampFallback = false;
         m_warnedExposurePriority = false;
-        m_pendingControlWrites.clear();
+        {
+            QMutexLocker locker(&m_controlMutex);
+            m_pendingControlWrites.clear();
+            m_pendingButtonControls.clear();
+        }
 
         auto wantedDevice = m_settingsDialog->selectedDevice();
         QString matchWarning;
@@ -682,15 +693,18 @@ private:
     void applyPendingControlWrites(V4L2Camera::Device &device)
     {
         QHash<quint32, qint64> pending;
+        QList<quint32> pendingButtons;
         QHash<quint32, qint64> desired;
         {
             QMutexLocker locker(&m_controlMutex);
             pending = m_pendingControlWrites;
             m_pendingControlWrites.clear();
+            pendingButtons = m_pendingButtonControls;
+            m_pendingButtonControls.clear();
             desired = m_desiredControlValues;
         }
 
-        if (pending.isEmpty())
+        if (pending.isEmpty() && pendingButtons.isEmpty())
             return;
 
         bool needControlRefresh = false;
@@ -726,6 +740,16 @@ private:
             }
             if (V4L2Camera::autoControlIds().contains(control.id))
                 needControlRefresh = true;
+        }
+
+        for (const auto id : pendingButtons) {
+            if (!m_controlMap.contains(id))
+                continue;
+
+            const auto control = m_controlMap.value(id);
+            QString error;
+            if (!device.triggerButtonControl(control, &error))
+                logWarning(m_log, error);
         }
 
         {

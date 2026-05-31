@@ -469,7 +469,7 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
         widgets.button = button;
         connect(button, &QPushButton::clicked, this, [this, id = control.id]() {
             if (!m_blockUiSignals)
-                handleControlEdited(id, 0);
+                Q_EMIT buttonControlTriggered(id);
         });
         grid->addWidget(button, 0, 1);
     } else if (fitsInt(control.minimum) && fitsInt(control.maximum) && fitsInt(control.currentValue)) {
@@ -594,7 +594,7 @@ void V4L2SettingsDialog::updateDependencyStates()
 
         const auto &control = m_controls[id];
         const bool autoDisabled = V4L2Camera::isManualDependentActive(id, m_desiredValues);
-        const bool writable = control.canWrite() && !autoDisabled;
+        const bool writable = control.canWrite() && !autoDisabled && (!control.isButton() || m_running);
 
         if (it->editor != nullptr)
             it->editor->setEnabled(writable);
@@ -607,6 +607,8 @@ void V4L2SettingsDialog::updateDependencyStates()
                 it->stateLabel->setText(QStringLiteral("Inactive"));
             else if (autoDisabled)
                 it->stateLabel->setText(QStringLiteral("Auto"));
+            else if (control.isButton() && !m_running)
+                it->stateLabel->setText(QStringLiteral("Live only"));
             else
                 it->stateLabel->clear();
         }
