@@ -343,11 +343,23 @@ public:
             return;
         }
 
-        if (!configureDevice(device, &m_effectiveMode, &controls, &error, true)) {
+        const auto preparedEffectiveMode = m_effectiveMode;
+        V4L2Camera::CaptureMode runEffectiveMode;
+        if (!configureDevice(device, &runEffectiveMode, &controls, &error, true)) {
             raiseError(error);
             cleanup();
             return;
         }
+        // Stream metadata was committed in prepare(); abort if the second fd
+        // reports different metadata-bearing mode fields before streaming.
+        if (!effectiveModeMetadataMatches(preparedEffectiveMode, runEffectiveMode)) {
+            raiseError(
+                QStringLiteral("V4L2 effective mode changed between prepare and capture. Prepared: %1. Capture: %2.")
+                    .arg(effectiveModeMetadataSummary(preparedEffectiveMode), effectiveModeMetadataSummary(runEffectiveMode)));
+            cleanup();
+            return;
+        }
+        m_effectiveMode = runEffectiveMode;
         updateControlMap(controls);
 
         V4L2Camera::FrameDecoder decoder;
@@ -779,6 +791,31 @@ private:
             if (!control.isClassMarker())
                 m_controlMap.insert(control.id, control);
         }
+    }
+
+    static bool effectiveModeMetadataMatches(
+        const V4L2Camera::CaptureMode &preparedMode,
+        const V4L2Camera::CaptureMode &runMode)
+    {
+        return preparedMode.fourcc == runMode.fourcc && preparedMode.width == runMode.width
+            && preparedMode.height == runMode.height && preparedMode.timeperframeNum == runMode.timeperframeNum
+            && preparedMode.timeperframeDen == runMode.timeperframeDen && preparedMode.cvType == runMode.cvType
+            && preparedMode.bytesPerLine == runMode.bytesPerLine && preparedMode.colorspace == runMode.colorspace
+            && preparedMode.field == runMode.field;
+    }
+
+    static QString effectiveModeMetadataSummary(const V4L2Camera::CaptureMode &mode)
+    {
+        return QStringLiteral("%1 %2x%3 tpf %4/%5 stride %6 colorspace %7 field %8 cvType %9")
+            .arg(mode.fourccString)
+            .arg(mode.width)
+            .arg(mode.height)
+            .arg(mode.timeperframeNum)
+            .arg(mode.timeperframeDen)
+            .arg(mode.bytesPerLine)
+            .arg(mode.colorspace)
+            .arg(mode.field)
+            .arg(mode.cvType);
     }
 
     void warnOnce(std::atomic_bool *flag, const QString &title, const QString &message)
