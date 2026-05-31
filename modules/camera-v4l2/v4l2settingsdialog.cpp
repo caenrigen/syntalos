@@ -14,12 +14,14 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStringList>
 #include <QTabWidget>
 #include <QVBoxLayout>
 
@@ -35,6 +37,46 @@ bool fitsInt(qint64 value)
     return value >= std::numeric_limits<int>::min() && value <= std::numeric_limits<int>::max();
 }
 
+int intStep(qint64 step)
+{
+    if (step <= 1)
+        return 1;
+    if (step > std::numeric_limits<int>::max())
+        return std::numeric_limits<int>::max();
+    return static_cast<int>(step);
+}
+
+bool isIntegerControl(const V4L2Camera::ControlInfo &control)
+{
+    return control.type == V4L2_CTRL_TYPE_INTEGER || control.type == V4L2_CTRL_TYPE_INTEGER64;
+}
+
+bool isEditableNumericControl(const V4L2Camera::ControlInfo &control)
+{
+    return isIntegerControl(control) || control.type == V4L2_CTRL_TYPE_BITMASK;
+}
+
+bool isGrabbed(const V4L2Camera::ControlInfo &control)
+{
+    return (control.flags & V4L2_CTRL_FLAG_GRABBED) != 0;
+}
+
+qint64 snapControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
+{
+    if (!isIntegerControl(control) || control.step <= 1)
+        return value;
+
+    const auto minValue = static_cast<long double>(control.minimum);
+    const auto step = static_cast<long double>(control.step);
+    const auto offset = static_cast<long double>(value) - minValue;
+    const auto snapped = minValue + std::round(offset / step) * step;
+    if (snapped <= static_cast<long double>(std::numeric_limits<qint64>::min()))
+        return std::numeric_limits<qint64>::min();
+    if (snapped >= static_cast<long double>(std::numeric_limits<qint64>::max()))
+        return std::numeric_limits<qint64>::max();
+    return static_cast<qint64>(snapped);
+}
+
 qint64 clampControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
 {
     if (control.type == V4L2_CTRL_TYPE_BUTTON)
@@ -43,7 +85,17 @@ qint64 clampControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
         return control.minimum;
     if (value > control.maximum)
         return control.maximum;
-    return value;
+    const auto snapped = snapControlValue(control, value);
+    if (snapped < control.minimum)
+        return control.minimum;
+    if (snapped > control.maximum)
+        return control.maximum;
+    return snapped;
+}
+
+QString hexId(quint32 value)
+{
+    return QStringLiteral("0x%1").arg(value, 8, 16, QLatin1Char('0'));
 }
 
 int dependencySortKey(quint32 id)
@@ -59,9 +111,412 @@ int dependencySortKey(quint32 id)
     return 1000;
 }
 
-QString controlTooltip(const V4L2Camera::ControlInfo &control)
+int valueHexWidth(const V4L2Camera::ControlInfo &control)
 {
-    return QStringLiteral("0x%1, %2").arg(control.id, 0, 16).arg(V4L2Camera::controlTypeName(control.type));
+    const auto maxValue = std::max<qint64>(0, std::max(control.maximum, std::max(control.currentValue, control.defaultValue)));
+    return maxValue > std::numeric_limits<quint32>::max() ? 16 : 8;
+}
+
+QString hexValue(const V4L2Camera::ControlInfo &control, qint64 value)
+{
+    return QStringLiteral("0x%1")
+        .arg(static_cast<qulonglong>(value), valueHexWidth(control), 16, QLatin1Char('0'));
+}
+
+QString symbolicControlName(quint32 id)
+{
+#define V4L2_CONTROL_NAME_CASE(name) \
+    case name:                       \
+        return QStringLiteral(#name);
+
+    switch (id) {
+#ifdef V4L2_CID_BRIGHTNESS
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_BRIGHTNESS)
+#endif
+#ifdef V4L2_CID_CONTRAST
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_CONTRAST)
+#endif
+#ifdef V4L2_CID_SATURATION
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_SATURATION)
+#endif
+#ifdef V4L2_CID_HUE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_HUE)
+#endif
+#ifdef V4L2_CID_AUTO_WHITE_BALANCE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTO_WHITE_BALANCE)
+#endif
+#ifdef V4L2_CID_DO_WHITE_BALANCE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_DO_WHITE_BALANCE)
+#endif
+#ifdef V4L2_CID_RED_BALANCE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_RED_BALANCE)
+#endif
+#ifdef V4L2_CID_BLUE_BALANCE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_BLUE_BALANCE)
+#endif
+#ifdef V4L2_CID_GAMMA
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_GAMMA)
+#endif
+#ifdef V4L2_CID_EXPOSURE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_EXPOSURE)
+#endif
+#ifdef V4L2_CID_AUTOGAIN
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTOGAIN)
+#endif
+#ifdef V4L2_CID_GAIN
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_GAIN)
+#endif
+#ifdef V4L2_CID_HFLIP
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_HFLIP)
+#endif
+#ifdef V4L2_CID_VFLIP
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_VFLIP)
+#endif
+#ifdef V4L2_CID_POWER_LINE_FREQUENCY
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_POWER_LINE_FREQUENCY)
+#endif
+#ifdef V4L2_CID_HUE_AUTO
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_HUE_AUTO)
+#endif
+#ifdef V4L2_CID_WHITE_BALANCE_TEMPERATURE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_WHITE_BALANCE_TEMPERATURE)
+#endif
+#ifdef V4L2_CID_SHARPNESS
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_SHARPNESS)
+#endif
+#ifdef V4L2_CID_BACKLIGHT_COMPENSATION
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_BACKLIGHT_COMPENSATION)
+#endif
+#ifdef V4L2_CID_CHROMA_AGC
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_CHROMA_AGC)
+#endif
+#ifdef V4L2_CID_COLOR_KILLER
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_COLOR_KILLER)
+#endif
+#ifdef V4L2_CID_COLORFX
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_COLORFX)
+#endif
+#ifdef V4L2_CID_AUTOBRIGHTNESS
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTOBRIGHTNESS)
+#endif
+#ifdef V4L2_CID_ROTATE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ROTATE)
+#endif
+#ifdef V4L2_CID_CHROMA_GAIN
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_CHROMA_GAIN)
+#endif
+#ifdef V4L2_CID_ALPHA_COMPONENT
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ALPHA_COMPONENT)
+#endif
+#ifdef V4L2_CID_EXPOSURE_AUTO
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_EXPOSURE_AUTO)
+#endif
+#ifdef V4L2_CID_EXPOSURE_ABSOLUTE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_EXPOSURE_ABSOLUTE)
+#endif
+#ifdef V4L2_CID_EXPOSURE_AUTO_PRIORITY
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_EXPOSURE_AUTO_PRIORITY)
+#endif
+#ifdef V4L2_CID_PAN_RELATIVE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_PAN_RELATIVE)
+#endif
+#ifdef V4L2_CID_TILT_RELATIVE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_TILT_RELATIVE)
+#endif
+#ifdef V4L2_CID_PAN_RESET
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_PAN_RESET)
+#endif
+#ifdef V4L2_CID_TILT_RESET
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_TILT_RESET)
+#endif
+#ifdef V4L2_CID_PAN_ABSOLUTE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_PAN_ABSOLUTE)
+#endif
+#ifdef V4L2_CID_TILT_ABSOLUTE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_TILT_ABSOLUTE)
+#endif
+#ifdef V4L2_CID_FOCUS_ABSOLUTE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_FOCUS_ABSOLUTE)
+#endif
+#ifdef V4L2_CID_FOCUS_RELATIVE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_FOCUS_RELATIVE)
+#endif
+#ifdef V4L2_CID_FOCUS_AUTO
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_FOCUS_AUTO)
+#endif
+#ifdef V4L2_CID_ZOOM_ABSOLUTE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ZOOM_ABSOLUTE)
+#endif
+#ifdef V4L2_CID_ZOOM_RELATIVE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ZOOM_RELATIVE)
+#endif
+#ifdef V4L2_CID_ZOOM_CONTINUOUS
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ZOOM_CONTINUOUS)
+#endif
+#ifdef V4L2_CID_PRIVACY
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_PRIVACY)
+#endif
+#ifdef V4L2_CID_IRIS_ABSOLUTE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_IRIS_ABSOLUTE)
+#endif
+#ifdef V4L2_CID_IRIS_RELATIVE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_IRIS_RELATIVE)
+#endif
+#ifdef V4L2_CID_AUTO_EXPOSURE_BIAS
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTO_EXPOSURE_BIAS)
+#endif
+#ifdef V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE)
+#endif
+#ifdef V4L2_CID_WIDE_DYNAMIC_RANGE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_WIDE_DYNAMIC_RANGE)
+#endif
+#ifdef V4L2_CID_IMAGE_STABILIZATION
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_IMAGE_STABILIZATION)
+#endif
+#ifdef V4L2_CID_ISO_SENSITIVITY
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ISO_SENSITIVITY)
+#endif
+#ifdef V4L2_CID_ISO_SENSITIVITY_AUTO
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ISO_SENSITIVITY_AUTO)
+#endif
+#ifdef V4L2_CID_EXPOSURE_METERING
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_EXPOSURE_METERING)
+#endif
+#ifdef V4L2_CID_SCENE_MODE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_SCENE_MODE)
+#endif
+#ifdef V4L2_CID_3A_LOCK
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_3A_LOCK)
+#endif
+#ifdef V4L2_CID_AUTO_FOCUS_START
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTO_FOCUS_START)
+#endif
+#ifdef V4L2_CID_AUTO_FOCUS_STOP
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTO_FOCUS_STOP)
+#endif
+#ifdef V4L2_CID_AUTO_FOCUS_STATUS
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTO_FOCUS_STATUS)
+#endif
+#ifdef V4L2_CID_AUTO_FOCUS_RANGE
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_AUTO_FOCUS_RANGE)
+#endif
+#ifdef V4L2_CID_PAN_SPEED
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_PAN_SPEED)
+#endif
+#ifdef V4L2_CID_TILT_SPEED
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_TILT_SPEED)
+#endif
+#ifdef V4L2_CID_VBLANK
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_VBLANK)
+#endif
+#ifdef V4L2_CID_HBLANK
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_HBLANK)
+#endif
+#ifdef V4L2_CID_ANALOGUE_GAIN
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_ANALOGUE_GAIN)
+#endif
+#ifdef V4L2_CID_TEST_PATTERN
+        V4L2_CONTROL_NAME_CASE(V4L2_CID_TEST_PATTERN)
+#endif
+    default:
+        return {};
+    }
+
+#undef V4L2_CONTROL_NAME_CASE
+}
+
+QString controlApiId(const V4L2Camera::ControlInfo &control)
+{
+    const auto symbolicName = symbolicControlName(control.id);
+    if (symbolicName.isEmpty())
+        return hexId(control.id);
+    return QStringLiteral("%1 (%2)").arg(symbolicName, hexId(control.id));
+}
+
+QString menuValueName(const V4L2Camera::ControlInfo &control, qint64 value)
+{
+    for (const auto &entry : control.menu) {
+        if (entry.value == value)
+            return entry.name;
+    }
+    return {};
+}
+
+QString formatControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
+{
+    if (control.type == V4L2_CTRL_TYPE_BOOLEAN)
+        return value != 0 ? QStringLiteral("true (1)") : QStringLiteral("false (0)");
+
+    if (control.type == V4L2_CTRL_TYPE_MENU || control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
+        const auto name = menuValueName(control, value);
+        if (!name.isEmpty())
+            return QStringLiteral("%1 (%2)").arg(name, QString::number(value));
+    }
+
+    if (control.type == V4L2_CTRL_TYPE_BITMASK)
+        return QStringLiteral("%1 (%2)").arg(hexValue(control, value), QString::number(value));
+
+    return QString::number(value);
+}
+
+QString editorTextForValue(const V4L2Camera::ControlInfo &control, qint64 value)
+{
+    if (control.type == V4L2_CTRL_TYPE_BITMASK)
+        return hexValue(control, value);
+    return QString::number(value);
+}
+
+bool parseControlValue(const V4L2Camera::ControlInfo &control, const QString &text, qint64 *value)
+{
+    if (value == nullptr)
+        return false;
+
+    const auto trimmed = text.trimmed();
+    if (trimmed.isEmpty())
+        return false;
+
+    if (control.type == V4L2_CTRL_TYPE_BITMASK) {
+        bool ok = false;
+        const auto parsed = trimmed.toULongLong(&ok, 0);
+        if (!ok || parsed > static_cast<qulonglong>(std::numeric_limits<qint64>::max()))
+            return false;
+        if (parsed < static_cast<qulonglong>(std::max<qint64>(0, control.minimum))
+            || parsed > static_cast<qulonglong>(std::max<qint64>(0, control.maximum)))
+            return false;
+        *value = static_cast<qint64>(parsed);
+        return true;
+    }
+
+    bool ok = false;
+    const auto parsed = trimmed.toLongLong(&ok, 0);
+    if (!ok)
+        return false;
+    *value = clampControlValue(control, parsed);
+    return true;
+}
+
+QString controlFlagsText(const V4L2Camera::ControlInfo &control)
+{
+    QStringList names;
+    if ((control.flags & V4L2_CTRL_FLAG_DISABLED) != 0)
+        names << QStringLiteral("disabled");
+    if ((control.flags & V4L2_CTRL_FLAG_GRABBED) != 0)
+        names << QStringLiteral("grabbed");
+    if ((control.flags & V4L2_CTRL_FLAG_READ_ONLY) != 0)
+        names << QStringLiteral("read-only");
+    if ((control.flags & V4L2_CTRL_FLAG_UPDATE) != 0)
+        names << QStringLiteral("update");
+    if ((control.flags & V4L2_CTRL_FLAG_INACTIVE) != 0)
+        names << QStringLiteral("inactive");
+    if ((control.flags & V4L2_CTRL_FLAG_SLIDER) != 0)
+        names << QStringLiteral("slider");
+    if ((control.flags & V4L2_CTRL_FLAG_WRITE_ONLY) != 0)
+        names << QStringLiteral("write-only");
+    if ((control.flags & V4L2_CTRL_FLAG_VOLATILE) != 0)
+        names << QStringLiteral("volatile");
+#ifdef V4L2_CTRL_FLAG_HAS_PAYLOAD
+    if ((control.flags & V4L2_CTRL_FLAG_HAS_PAYLOAD) != 0)
+        names << QStringLiteral("has-payload");
+#endif
+#ifdef V4L2_CTRL_FLAG_EXECUTE_ON_WRITE
+    if ((control.flags & V4L2_CTRL_FLAG_EXECUTE_ON_WRITE) != 0)
+        names << QStringLiteral("execute-on-write");
+#endif
+#ifdef V4L2_CTRL_FLAG_MODIFY_LAYOUT
+    if ((control.flags & V4L2_CTRL_FLAG_MODIFY_LAYOUT) != 0)
+        names << QStringLiteral("modify-layout");
+#endif
+#ifdef V4L2_CTRL_FLAG_DYNAMIC_ARRAY
+    if ((control.flags & V4L2_CTRL_FLAG_DYNAMIC_ARRAY) != 0)
+        names << QStringLiteral("dynamic-array");
+#endif
+#ifdef V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX
+    if ((control.flags & V4L2_CTRL_FLAG_HAS_WHICH_MIN_MAX) != 0)
+        names << QStringLiteral("has-which-min-max");
+#endif
+
+    const auto hexFlags = QStringLiteral("0x%1").arg(control.flags, 0, 16);
+    if (names.isEmpty())
+        return QStringLiteral("%1 (none)").arg(hexFlags);
+    return QStringLiteral("%1 (%2)").arg(hexFlags, names.join(QStringLiteral(", ")));
+}
+
+QString staticControlStateReason(const V4L2Camera::ControlInfo &control)
+{
+    if (control.isDisabled())
+        return QStringLiteral("Disabled by driver.");
+    if (control.isReadOnly())
+        return QStringLiteral("Read-only control.");
+    if (control.isWriteOnly())
+        return QStringLiteral("Write-only control.");
+    if (control.isInactive())
+        return QStringLiteral("Inactive until a related control or stream state changes.");
+    if (isGrabbed(control))
+        return QStringLiteral("Temporarily locked by the driver.");
+    return {};
+}
+
+QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &disabledReason = QString())
+{
+    QStringList lines;
+    lines << QStringLiteral("Name: %1").arg(control.name);
+    lines << QStringLiteral("API ID: %1").arg(controlApiId(control));
+    lines << QStringLiteral("Class: %1").arg(control.className());
+    lines << QStringLiteral("Type: %1").arg(V4L2Camera::controlTypeName(control.type));
+    lines << QStringLiteral("Current: %1").arg(formatControlValue(control, control.currentValue));
+    lines << QStringLiteral("Default: %1").arg(formatControlValue(control, control.defaultValue));
+    lines << QStringLiteral("Range: %1 to %2, step %3")
+                 .arg(
+                     formatControlValue(control, control.minimum),
+                     formatControlValue(control, control.maximum),
+                     QString::number(control.step));
+    lines << QStringLiteral("Flags: %1").arg(controlFlagsText(control));
+
+    QStringList access;
+    access << (control.canRead() ? QStringLiteral("readable") : QStringLiteral("not readable"));
+    access << (control.canWrite() ? QStringLiteral("writable") : QStringLiteral("not writable"));
+    if (control.restorable())
+        access << QStringLiteral("resettable");
+    lines << QStringLiteral("Access: %1").arg(access.join(QStringLiteral(", ")));
+
+    const auto stateReason = disabledReason.isEmpty() ? staticControlStateReason(control) : disabledReason;
+    if (!stateReason.isEmpty())
+        lines << QStringLiteral("State: %1").arg(stateReason);
+
+    return lines.join(QLatin1Char('\n'));
+}
+
+bool shouldUseSlider(const V4L2Camera::ControlInfo &control)
+{
+    if (control.type != V4L2_CTRL_TYPE_INTEGER)
+        return false;
+    if (!fitsInt(control.minimum) || !fitsInt(control.maximum))
+        return false;
+    const auto range = control.maximum - control.minimum;
+    return (control.flags & V4L2_CTRL_FLAG_SLIDER) != 0 || range <= 10000;
+}
+
+QString autoDisabledReason(
+    quint32 id,
+    const QHash<quint32, V4L2Camera::ControlInfo> &controls,
+    const QHash<quint32, qint64> &values)
+{
+    const auto table = V4L2Camera::autoDependencyTable();
+    for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
+        if (!it.value().contains(id))
+            continue;
+
+        const auto autoControlIt = controls.constFind(it.key());
+        const auto autoValueIt = values.constFind(it.key());
+        if (autoControlIt == controls.constEnd() || autoValueIt == values.constEnd())
+            continue;
+        if (!V4L2Camera::autoControlEnabled(it.key(), autoValueIt.value()))
+            continue;
+
+        return QStringLiteral("Disabled while %1 is enabled.").arg(autoControlIt->name);
+    }
+    return {};
 }
 
 int defaultFormatRank(const V4L2Camera::CaptureMode &mode)
@@ -629,12 +1084,12 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
     grid->setContentsMargins(0, 0, 0, 0);
     grid->setColumnStretch(1, 1);
 
-    auto *nameLabel = new QLabel(control.name, row);
-    nameLabel->setToolTip(controlTooltip(control));
-    grid->addWidget(nameLabel, 0, 0);
-
     ControlWidgets widgets;
     widgets.row = row;
+    auto *nameLabel = new QLabel(control.name, row);
+    widgets.nameLabel = nameLabel;
+    grid->addWidget(nameLabel, 0, 0);
+
     widgets.stateLabel = new QLabel(row);
     widgets.stateLabel->setMinimumWidth(70);
 
@@ -672,17 +1127,17 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
                 Q_EMIT buttonControlTriggered(id);
         });
         grid->addWidget(button, 0, 1);
-    } else if (fitsInt(control.minimum) && fitsInt(control.maximum) && fitsInt(control.currentValue)) {
+    } else if (shouldUseSlider(control)) {
         auto *editor = new QWidget(row);
         auto *layout = new QHBoxLayout(editor);
         layout->setContentsMargins(0, 0, 0, 0);
 
         auto *slider = new QSlider(Qt::Horizontal, editor);
         slider->setRange(static_cast<int>(control.minimum), static_cast<int>(control.maximum));
-        slider->setSingleStep(static_cast<int>(std::max<qint64>(1, control.step)));
+        slider->setSingleStep(intStep(control.step));
         auto *spinBox = new QSpinBox(editor);
         spinBox->setRange(static_cast<int>(control.minimum), static_cast<int>(control.maximum));
-        spinBox->setSingleStep(static_cast<int>(std::max<qint64>(1, control.step)));
+        spinBox->setSingleStep(intStep(control.step));
 
         layout->addWidget(slider, 1);
         layout->addWidget(spinBox);
@@ -705,21 +1160,53 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
             handleControlEdited(id, value);
         });
         grid->addWidget(editor, 0, 1);
+    } else if (control.type == V4L2_CTRL_TYPE_INTEGER && fitsInt(control.minimum) && fitsInt(control.maximum)) {
+        auto *spinBox = new QSpinBox(row);
+        spinBox->setRange(static_cast<int>(control.minimum), static_cast<int>(control.maximum));
+        spinBox->setSingleStep(intStep(control.step));
+        widgets.editor = spinBox;
+        widgets.spinBox = spinBox;
+        connect(spinBox, qOverload<int>(&QSpinBox::valueChanged), this, [this, id = control.id](int value) {
+            if (!m_blockUiSignals)
+                handleControlEdited(id, value);
+        });
+        grid->addWidget(spinBox, 0, 1);
+    } else if (isEditableNumericControl(control)) {
+        auto *lineEdit = new QLineEdit(row);
+        lineEdit->setClearButtonEnabled(false);
+        widgets.editor = lineEdit;
+        widgets.lineEdit = lineEdit;
+        connect(lineEdit, &QLineEdit::editingFinished, this, [this, id = control.id, lineEdit]() {
+            if (m_blockUiSignals || !m_controls.contains(id))
+                return;
+
+            qint64 parsedValue = 0;
+            const auto &control = m_controls[id];
+            if (parseControlValue(control, lineEdit->text(), &parsedValue)) {
+                handleControlEdited(id, parsedValue);
+            } else {
+                setControlWidgetValue(id, m_desiredValues.value(id, control.currentValue));
+            }
+        });
+        grid->addWidget(lineEdit, 0, 1);
     } else {
-        auto *label = new QLabel(QString::number(control.currentValue), row);
+        auto *label = new QLabel(formatControlValue(control, control.currentValue), row);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
         widgets.editor = label;
         grid->addWidget(label, 0, 1);
     }
 
-    widgets.resetButton = new QPushButton(QStringLiteral("Default"), row);
-    connect(widgets.resetButton, &QPushButton::clicked, this, [this, id = control.id, defaultValue = control.defaultValue]() {
-        handleControlEdited(id, defaultValue);
+    widgets.resetButton = new QPushButton(QStringLiteral("Reset"), row);
+    connect(widgets.resetButton, &QPushButton::clicked, this, [this, id = control.id]() {
+        if (m_controls.contains(id))
+            handleControlEdited(id, m_controls.value(id).defaultValue);
     });
 
     grid->addWidget(widgets.stateLabel, 0, 2);
     grid->addWidget(widgets.resetButton, 0, 3);
     m_controlWidgets.insert(control.id, widgets);
     setControlWidgetValue(control.id, control.currentValue);
+    updateControlPresentation(control.id);
     return row;
 }
 
@@ -731,6 +1218,7 @@ void V4L2SettingsDialog::setControlWidgetValue(quint32 id, qint64 value)
     const bool oldBlockState = m_blockUiSignals;
     m_blockUiSignals = true;
     auto &widgets = m_controlWidgets[id];
+    const auto control = m_controls.value(id);
     if (widgets.checkBox != nullptr) {
         widgets.checkBox->setChecked(value != 0);
     } else if (widgets.comboBox != nullptr) {
@@ -743,8 +1231,12 @@ void V4L2SettingsDialog::setControlWidgetValue(quint32 id, qint64 value)
     } else if (widgets.slider != nullptr && widgets.spinBox != nullptr && fitsInt(value)) {
         widgets.slider->setValue(static_cast<int>(value));
         widgets.spinBox->setValue(static_cast<int>(value));
+    } else if (widgets.spinBox != nullptr && fitsInt(value)) {
+        widgets.spinBox->setValue(static_cast<int>(value));
+    } else if (widgets.lineEdit != nullptr) {
+        widgets.lineEdit->setText(editorTextForValue(control, value));
     } else if (auto *label = qobject_cast<QLabel *>(widgets.editor)) {
-        label->setText(QString::number(value));
+        label->setText(formatControlValue(control, value));
     }
     m_blockUiSignals = oldBlockState;
 }
@@ -761,6 +1253,37 @@ void V4L2SettingsDialog::handleControlEdited(quint32 id, qint64 value)
     setControlWidgetValue(id, value);
     updateDependencyStates();
     Q_EMIT controlValueChanged(id, value);
+}
+
+void V4L2SettingsDialog::updateControlPresentation(quint32 id, const QString &disabledReason)
+{
+    if (!m_controls.contains(id) || !m_controlWidgets.contains(id))
+        return;
+
+    const auto &control = m_controls[id];
+    auto &widgets = m_controlWidgets[id];
+    const auto tooltip = controlTooltip(control, disabledReason);
+    const auto applyTooltip = [&tooltip](QWidget *widget) {
+        if (widget != nullptr)
+            widget->setToolTip(tooltip);
+    };
+
+    applyTooltip(widgets.row);
+    applyTooltip(widgets.nameLabel);
+    applyTooltip(widgets.editor);
+    applyTooltip(widgets.slider);
+    applyTooltip(widgets.spinBox);
+    applyTooltip(widgets.lineEdit);
+    applyTooltip(widgets.comboBox);
+    applyTooltip(widgets.checkBox);
+    applyTooltip(widgets.button);
+    applyTooltip(widgets.stateLabel);
+
+    if (widgets.resetButton != nullptr) {
+        widgets.resetButton->setText(QStringLiteral("Reset"));
+        widgets.resetButton->setToolTip(
+            QStringLiteral("Reset to default value: %1").arg(formatControlValue(control, control.defaultValue)));
+    }
 }
 
 void V4L2SettingsDialog::updateSummary()
@@ -794,24 +1317,45 @@ void V4L2SettingsDialog::updateDependencyStates()
 
         const auto &control = m_controls[id];
         const bool autoDisabled = V4L2Camera::isManualDependentActive(id, m_desiredValues);
-        const bool writable = control.canWrite() && !autoDisabled && (!control.isButton() || m_running);
+        const bool writable = control.canWrite() && !isGrabbed(control) && !autoDisabled && (!control.isButton() || m_running);
+        const bool readableValue = control.canRead();
+        const bool copyableReadOnly = control.isReadOnly() && readableValue;
+        const bool modified = m_desiredValues.value(id, control.currentValue) != control.defaultValue;
 
-        if (it->editor != nullptr)
+        if (it->slider != nullptr)
+            it->slider->setEnabled(writable);
+        if (it->spinBox != nullptr) {
+            it->spinBox->setEnabled(writable || copyableReadOnly);
+            it->spinBox->setReadOnly(!writable);
+        } else if (it->lineEdit != nullptr) {
+            it->lineEdit->setEnabled(writable || copyableReadOnly);
+            it->lineEdit->setReadOnly(!writable);
+        } else if (qobject_cast<QLabel *>(it->editor) != nullptr) {
+            it->editor->setEnabled(true);
+        } else if (it->editor != nullptr) {
             it->editor->setEnabled(writable);
+        }
         if (it->resetButton != nullptr)
-            it->resetButton->setEnabled(control.restorable() && !autoDisabled);
+            it->resetButton->setEnabled(control.restorable() && !autoDisabled && !isGrabbed(control) && modified);
         if (it->stateLabel != nullptr) {
             if (control.isReadOnly())
                 it->stateLabel->setText(QStringLiteral("Read-only"));
-            else if (control.isInactive())
-                it->stateLabel->setText(QStringLiteral("Inactive"));
             else if (autoDisabled)
                 it->stateLabel->setText(QStringLiteral("Auto"));
+            else if (isGrabbed(control))
+                it->stateLabel->setText(QStringLiteral("Locked"));
             else if (control.isButton() && !m_running)
                 it->stateLabel->setText(QStringLiteral("Live only"));
             else
                 it->stateLabel->clear();
         }
+
+        QString disabledReason;
+        if (autoDisabled)
+            disabledReason = autoDisabledReason(id, m_controls, m_desiredValues);
+        else if (control.isButton() && !m_running)
+            disabledReason = QStringLiteral("Button controls are only available while acquisition is running.");
+        updateControlPresentation(id, disabledReason);
     }
 }
 

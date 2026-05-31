@@ -17,6 +17,7 @@ class QCheckBox;
 class QComboBox;
 class QGridLayout;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QSlider;
 class QSpinBox;
@@ -58,9 +59,11 @@ private Q_SLOTS:
 private:
     struct ControlWidgets {
         QWidget *row = nullptr;
+        QLabel *nameLabel = nullptr;
         QWidget *editor = nullptr;
         QSlider *slider = nullptr;
         QSpinBox *spinBox = nullptr;
+        QLineEdit *lineEdit = nullptr;
         QComboBox *comboBox = nullptr;
         QCheckBox *checkBox = nullptr;
         QPushButton *button = nullptr;
@@ -96,6 +99,7 @@ private:
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
     void setControlWidgetValue(quint32 id, qint64 value);
     void handleControlEdited(quint32 id, qint64 value);
+    void updateControlPresentation(quint32 id, const QString &disabledReason = QString());
     void updateSummary();
     void updateDependencyStates();
     QVariantList serializableControlSettings() const;
