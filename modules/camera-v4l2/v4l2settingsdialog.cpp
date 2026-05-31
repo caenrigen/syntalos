@@ -24,6 +24,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace
@@ -61,6 +62,116 @@ int dependencySortKey(quint32 id)
 QString controlTooltip(const V4L2Camera::ControlInfo &control)
 {
     return QStringLiteral("0x%1, %2").arg(control.id, 0, 16).arg(V4L2Camera::controlTypeName(control.type));
+}
+
+int defaultFormatRank(const V4L2Camera::CaptureMode &mode)
+{
+    if (mode.fourcc == V4L2_PIX_FMT_YUYV)
+        return 0;
+    if (mode.fourcc == V4L2_PIX_FMT_GREY)
+        return 1;
+    if (mode.fourcc == V4L2_PIX_FMT_MJPEG || mode.fourcc == v4l2_fourcc('M', 'J', 'P', 'G'))
+        return 2;
+    return 3;
+}
+
+bool betterDefaultTieBreak(const V4L2Camera::CaptureMode &a, const V4L2Camera::CaptureMode &b, double targetFps)
+{
+    if (a.emulated != b.emulated)
+        return !a.emulated;
+    if (a.compressed != b.compressed)
+        return !a.compressed;
+
+    const auto aFormatRank = defaultFormatRank(a);
+    const auto bFormatRank = defaultFormatRank(b);
+    if (aFormatRank != bFormatRank)
+        return aFormatRank < bFormatRank;
+
+    const auto aFpsDistance = std::abs(a.fps() - targetFps);
+    const auto bFpsDistance = std::abs(b.fps() - targetFps);
+    if (!qFuzzyCompare(aFpsDistance + 1.0, bFpsDistance + 1.0))
+        return aFpsDistance < bFpsDistance;
+
+    return a.fps() > b.fps();
+}
+
+int preferredExactModeIndex(const QList<V4L2Camera::CaptureMode> &modes, int width, int height, double fps)
+{
+    int bestIndex = -1;
+    for (int i = 0; i < modes.size(); ++i) {
+        const auto &mode = modes.at(i);
+        if (mode.width != width || mode.height != height)
+            continue;
+        if (std::abs(mode.fps() - fps) > 0.15)
+            continue;
+        if (bestIndex < 0 || betterDefaultTieBreak(mode, modes.at(bestIndex), fps))
+            bestIndex = i;
+    }
+    return bestIndex;
+}
+
+double fallbackDefaultScore(const V4L2Camera::CaptureMode &mode)
+{
+    constexpr double targetFps = 30.0;
+    constexpr double targetPixels = 1920.0 * 1080.0;
+    constexpr double targetAspect = 16.0 / 9.0;
+
+    const auto fps = mode.fps();
+    double score = std::abs(fps - targetFps) * 80.0;
+    if (fps < 10.0)
+        score += 2000.0;
+    else if (fps > 60.0)
+        score += (fps - 60.0) * 20.0;
+
+    const auto pixels = static_cast<double>(mode.width) * static_cast<double>(mode.height);
+    if (pixels <= targetPixels)
+        score += (targetPixels - pixels) / 1000.0;
+    else
+        score += 2000.0 + (pixels - targetPixels) / 250.0;
+
+    const auto aspect = static_cast<double>(mode.width) / static_cast<double>(mode.height);
+    score += std::abs(aspect - targetAspect) * 300.0;
+
+    if (mode.emulated)
+        score += 1000.0;
+    if (mode.compressed)
+        score += 250.0;
+    score += defaultFormatRank(mode) * 25.0;
+
+    return score;
+}
+
+int preferredDefaultModeIndex(const QList<V4L2Camera::CaptureMode> &modes)
+{
+    static const struct {
+        int width;
+        int height;
+        double fps;
+    } preferredModes[] = {
+        {1920, 1080, 30.0},
+        {1280, 720,  30.0},
+        {640,  480,  30.0},
+        {1920, 1080, 15.0},
+        {1280, 720,  15.0},
+        {640,  480,  15.0},
+    };
+
+    for (const auto &preferred : preferredModes) {
+        const auto index = preferredExactModeIndex(modes, preferred.width, preferred.height, preferred.fps);
+        if (index >= 0)
+            return index;
+    }
+
+    int bestIndex = -1;
+    double bestScore = std::numeric_limits<double>::max();
+    for (int i = 0; i < modes.size(); ++i) {
+        const auto score = fallbackDefaultScore(modes.at(i));
+        if (score < bestScore) {
+            bestIndex = i;
+            bestScore = score;
+        }
+    }
+    return bestIndex;
 }
 
 } // namespace
@@ -392,7 +503,7 @@ void V4L2SettingsDialog::populateModes(const QList<V4L2Camera::CaptureMode> &mod
     }
     const bool loadedModeMissed = m_loadedMode.isValid() && selectedIndex < 0;
     if (selectedIndex < 0 && m_modeCombo->count() > 0)
-        selectedIndex = 0;
+        selectedIndex = preferredDefaultModeIndex(modes);
     m_modeCombo->setCurrentIndex(selectedIndex);
 
     if (loadedModeMissed) {
