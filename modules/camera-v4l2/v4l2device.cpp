@@ -731,12 +731,16 @@ QList<CaptureMode> Device::enumerateCaptureModes(QString *error) const
     }
 
     std::sort(modes.begin(), modes.end(), [](const CaptureMode &a, const CaptureMode &b) {
-        if (a.width != b.width)
-            return a.width < b.width;
-        if (a.height != b.height)
-            return a.height < b.height;
         if (a.fourccString != b.fourccString)
             return a.fourccString < b.fourccString;
+        const auto aPixels = static_cast<qint64>(a.width) * static_cast<qint64>(a.height);
+        const auto bPixels = static_cast<qint64>(b.width) * static_cast<qint64>(b.height);
+        if (aPixels != bPixels)
+            return aPixels > bPixels;
+        if (a.width != b.width)
+            return a.width > b.width;
+        if (a.height != b.height)
+            return a.height > b.height;
         return a.fps() > b.fps();
     });
 

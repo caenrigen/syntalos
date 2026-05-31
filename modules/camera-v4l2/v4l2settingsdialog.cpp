@@ -8,6 +8,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDebug>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -367,9 +368,21 @@ void V4L2SettingsDialog::populateModes(const QList<V4L2Camera::CaptureMode> &mod
             break;
         }
     }
+    const bool loadedModeMissed = m_loadedMode.isValid() && selectedIndex < 0;
     if (selectedIndex < 0 && m_modeCombo->count() > 0)
         selectedIndex = 0;
     m_modeCombo->setCurrentIndex(selectedIndex);
+
+    if (loadedModeMissed) {
+        const auto fallbackMode = selectedMode();
+        const auto message = fallbackMode.isValid()
+            ? QStringLiteral("Saved V4L2 capture mode is not available: %1. Using %2 instead.")
+                  .arg(m_loadedMode.displayName(), fallbackMode.displayName())
+            : QStringLiteral("Saved V4L2 capture mode is not available: %1. No supported fallback mode is available.")
+                  .arg(m_loadedMode.displayName());
+        qWarning().noquote() << "camera-v4l2:" << message;
+        QMessageBox::warning(this, QStringLiteral("V4L2 Capture Mode"), message);
+    }
 }
 
 void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &controls)
