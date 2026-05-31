@@ -703,7 +703,9 @@ private:
         }
 
         auto sortedControls = *controls;
+        updateControlMap(sortedControls);
         const auto autoIds = V4L2Camera::autoControlIds();
+        const auto dependencyTable = V4L2Camera::autoDependencyTable();
         std::sort(sortedControls.begin(), sortedControls.end(), [&autoIds](const auto &a, const auto &b) {
             const auto aPriority = autoIds.contains(a.id) || a.id == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
             const auto bPriority = autoIds.contains(b.id) || b.id == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
@@ -712,7 +714,8 @@ private:
             return a.id < b.id;
         });
 
-        for (auto &control : sortedControls) {
+        for (const auto &listedControl : sortedControls) {
+            const auto control = m_controlMap.value(listedControl.id, listedControl);
             if (!desired.contains(control.id))
                 continue;
             if (!control.restorable())
@@ -737,6 +740,9 @@ private:
                         .arg(result.readbackValue)
                         .arg(result.requestedValue));
             }
+
+            if (dependencyTable.contains(control.id) && !V4L2Camera::autoControlEnabled(control.id, result.readbackValue))
+                reapplyManualDependentControls(device, control, dependencyTable, &desired, nullptr);
         }
 
         {
@@ -795,6 +801,76 @@ private:
         return false;
     }
 
+    static QHash<quint32, V4L2Camera::ControlInfo> controlsById(const QList<V4L2Camera::ControlInfo> &controls)
+    {
+        QHash<quint32, V4L2Camera::ControlInfo> result;
+        for (const auto &control : controls) {
+            if (!control.isClassMarker())
+                result.insert(control.id, control);
+        }
+        return result;
+    }
+
+    static QList<quint32> sortedControlWriteIds(const QHash<quint32, qint64> &pending)
+    {
+        auto ids = pending.keys();
+        const auto autoIds = V4L2Camera::autoControlIds();
+        std::sort(ids.begin(), ids.end(), [&autoIds](quint32 a, quint32 b) {
+            const auto aPriority = autoIds.contains(a) || a == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+            const auto bPriority = autoIds.contains(b) || b == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+            if (aPriority != bPriority)
+                return aPriority < bPriority;
+            return a < b;
+        });
+        return ids;
+    }
+
+    void reapplyManualDependentControls(
+        V4L2Camera::Device &device,
+        const V4L2Camera::ControlInfo &autoControl,
+        const QHash<quint32, QList<quint32>> &dependencyTable,
+        QHash<quint32, qint64> *desired,
+        QSet<quint32> *affectedRefreshIds)
+    {
+        const auto dependentIds = dependencyTable.value(autoControl.id);
+        if (dependentIds.isEmpty())
+            return;
+
+        auto controls = device.queryControls(nullptr);
+        if (controls.isEmpty())
+            return;
+        updateControlMap(controls);
+        const auto queriedControls = controlsById(controls);
+
+        for (const auto dependentId : dependentIds) {
+            if (affectedRefreshIds != nullptr)
+                affectedRefreshIds->insert(dependentId);
+
+            const auto dependentIt = queriedControls.constFind(dependentId);
+            if (dependentIt == queriedControls.constEnd())
+                continue;
+
+            const auto dependent = dependentIt.value();
+            if (!dependent.canRead() || !dependent.canWrite())
+                continue;
+
+            // Some UVC cameras, e.g. Logitech Webcam C930e, can report a manual
+            // value after auto mode is disabled but keep using a different physical
+            // state until a manual value is written.
+            const auto reportedManualValue = dependent.currentValue;
+            const auto result = device.setControlValue(dependent, reportedManualValue);
+            if (!result.success) {
+                logWarning(m_log, result.error);
+                continue;
+            }
+
+            if (desired != nullptr)
+                (*desired)[dependent.id] = result.readbackValue;
+            if (m_controlMap.contains(dependent.id))
+                m_controlMap[dependent.id].currentValue = result.readbackValue;
+        }
+    }
+
     void applyPendingControlWrites(V4L2Camera::Device &device)
     {
         QHash<quint32, qint64> pending;
@@ -814,15 +890,15 @@ private:
 
         QSet<quint32> affectedRefreshIds;
         const auto dependencyTable = V4L2Camera::autoDependencyTable();
-        for (auto it = pending.constBegin(); it != pending.constEnd(); ++it) {
-            if (!m_controlMap.contains(it.key()))
+        for (const auto id : sortedControlWriteIds(pending)) {
+            if (!m_controlMap.contains(id))
                 continue;
 
-            const auto control = m_controlMap.value(it.key());
+            const auto control = m_controlMap.value(id);
             if (V4L2Camera::isManualDependentActive(control.id, desired))
                 continue;
 
-            const auto result = device.setControlValue(control, it.value());
+            const auto result = device.setControlValue(control, pending.value(id));
             if (!result.success) {
                 logWarning(m_log, result.error);
                 continue;
@@ -846,8 +922,11 @@ private:
             }
 
             affectedRefreshIds.insert(control.id);
-            for (const auto dependentId : dependencyTable.value(control.id))
+            const auto dependentIds = dependencyTable.value(control.id);
+            for (const auto dependentId : dependentIds)
                 affectedRefreshIds.insert(dependentId);
+            if (!dependentIds.isEmpty() && !V4L2Camera::autoControlEnabled(control.id, result.readbackValue))
+                reapplyManualDependentControls(device, control, dependencyTable, &desired, &affectedRefreshIds);
         }
 
         for (const auto id : pendingButtons) {

@@ -492,6 +492,26 @@ QString unsupportedControlReason(const V4L2Camera::ControlInfo &control)
     return {};
 }
 
+QString manualModeReapplyNote(const V4L2Camera::ControlInfo &control)
+{
+    const auto table = V4L2Camera::autoDependencyTable();
+    if (table.contains(control.id)) {
+        return QStringLiteral(
+            "When this auto control is switched to manual/off, Syntalos reads dependent manual values and writes the "
+            "same values back once to keep reported and physical camera state aligned. This avoids divergence observed "
+            "on devices such as Logitech Webcam C930e.");
+    }
+
+    for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
+        if (it.value().contains(control.id)) {
+            return QStringLiteral(
+                "When the related auto control is switched to manual/off, Syntalos re-applies this reported manual value "
+                "once to keep reported and physical camera state aligned.");
+        }
+    }
+    return {};
+}
+
 QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &disabledReason = QString())
 {
     QStringList lines;
@@ -521,6 +541,9 @@ QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &di
         : (!unsupportedReason.isEmpty() ? unsupportedReason : staticControlStateReason(control));
     if (!stateReason.isEmpty())
         lines << QStringLiteral("State: %1").arg(stateReason);
+    const auto manualReapplyNote = manualModeReapplyNote(control);
+    if (!manualReapplyNote.isEmpty())
+        lines << QStringLiteral("Manual transition: %1").arg(manualReapplyNote);
 
     return lines.join(QLatin1Char('\n'));
 }
