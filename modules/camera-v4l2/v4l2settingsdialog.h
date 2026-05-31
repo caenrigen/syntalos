@@ -53,8 +53,6 @@ private Q_SLOTS:
     void onDeviceChanged(int index);
     void onModeChanged(int index);
     void onRefreshClicked();
-    void onReadControlsClicked();
-    void onResetControlsClicked();
 
 private:
     struct ControlWidgets {
@@ -78,8 +76,6 @@ private:
     QLabel *m_summaryLabel;
     QLabel *m_effectiveLabel;
     QPushButton *m_refreshButton;
-    QPushButton *m_readControlsButton;
-    QPushButton *m_resetControlsButton;
 
     bool m_running;
     bool m_blockUiSignals;
@@ -91,6 +87,7 @@ private:
     QHash<quint32, V4L2Camera::ControlInfo> m_controls;
     QHash<quint32, qint64> m_desiredValues;
     QHash<quint32, ControlWidgets> m_controlWidgets;
+    QHash<QString, QPushButton *> m_classResetButtons;
 
     void buildUi();
     void clearControlTabs();
@@ -99,6 +96,8 @@ private:
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
     void setControlWidgetValue(quint32 id, qint64 value);
     void handleControlEdited(quint32 id, qint64 value);
+    void readControlClass(const QString &className);
+    void resetControlClass(const QString &className);
     void updateControlPresentation(quint32 id, const QString &disabledReason = QString());
     void updateSummary();
     void updateDependencyStates();

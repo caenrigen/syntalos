@@ -6,6 +6,7 @@
 
 #include "v4l2settingsdialog.h"
 
+#include <QAbstractSpinBox>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDebug>
@@ -59,6 +60,16 @@ bool isEditableNumericControl(const V4L2Camera::ControlInfo &control)
 bool isGrabbed(const V4L2Camera::ControlInfo &control)
 {
     return (control.flags & V4L2_CTRL_FLAG_GRABBED) != 0;
+}
+
+bool hasPayload(const V4L2Camera::ControlInfo &control)
+{
+#ifdef V4L2_CTRL_FLAG_HAS_PAYLOAD
+    return (control.flags & V4L2_CTRL_FLAG_HAS_PAYLOAD) != 0;
+#else
+    Q_UNUSED(control)
+    return false;
+#endif
 }
 
 qint64 snapControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
@@ -343,6 +354,13 @@ QString menuValueName(const V4L2Camera::ControlInfo &control, qint64 value)
     return {};
 }
 
+QString rawControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
+{
+    if (control.type == V4L2_CTRL_TYPE_BITMASK)
+        return QStringLiteral("%1 / %2").arg(hexValue(control, value), QString::number(value));
+    return QString::number(value);
+}
+
 QString formatControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
 {
     if (control.type == V4L2_CTRL_TYPE_BOOLEAN)
@@ -351,13 +369,21 @@ QString formatControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
     if (control.type == V4L2_CTRL_TYPE_MENU || control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
         const auto name = menuValueName(control, value);
         if (!name.isEmpty())
-            return QStringLiteral("%1 (%2)").arg(name, QString::number(value));
+            return QStringLiteral("%1 [raw: %2]").arg(name, rawControlValue(control, value));
+        return QStringLiteral("Unknown [raw: %1]").arg(rawControlValue(control, value));
     }
 
     if (control.type == V4L2_CTRL_TYPE_BITMASK)
-        return QStringLiteral("%1 (%2)").arg(hexValue(control, value), QString::number(value));
+        return rawControlValue(control, value);
 
     return QString::number(value);
+}
+
+QString menuEntryText(const V4L2Camera::ControlInfo &control, const V4L2Camera::MenuEntry &entry)
+{
+    if (entry.name.isEmpty())
+        return QStringLiteral("Raw %1").arg(rawControlValue(control, entry.value));
+    return QStringLiteral("%1 [raw: %2]").arg(entry.name, rawControlValue(control, entry.value));
 }
 
 QString editorTextForValue(const V4L2Camera::ControlInfo &control, qint64 value)
@@ -457,6 +483,15 @@ QString staticControlStateReason(const V4L2Camera::ControlInfo &control)
     return {};
 }
 
+QString unsupportedControlReason(const V4L2Camera::ControlInfo &control)
+{
+    if (hasPayload(control))
+        return QStringLiteral("Unsupported V4L2 control type: %1 with payload.").arg(V4L2Camera::controlTypeName(control.type));
+    if (!control.supported)
+        return QStringLiteral("Unsupported V4L2 control type: %1.").arg(V4L2Camera::controlTypeName(control.type));
+    return {};
+}
+
 QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &disabledReason = QString())
 {
     QStringList lines;
@@ -480,7 +515,10 @@ QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &di
         access << QStringLiteral("resettable");
     lines << QStringLiteral("Access: %1").arg(access.join(QStringLiteral(", ")));
 
-    const auto stateReason = disabledReason.isEmpty() ? staticControlStateReason(control) : disabledReason;
+    const auto unsupportedReason = unsupportedControlReason(control);
+    const auto stateReason = !disabledReason.isEmpty()
+        ? disabledReason
+        : (!unsupportedReason.isEmpty() ? unsupportedReason : staticControlStateReason(control));
     if (!stateReason.isEmpty())
         lines << QStringLiteral("State: %1").arg(stateReason);
 
@@ -640,8 +678,6 @@ V4L2SettingsDialog::V4L2SettingsDialog(QWidget *parent)
       m_summaryLabel(nullptr),
       m_effectiveLabel(nullptr),
       m_refreshButton(nullptr),
-      m_readControlsButton(nullptr),
-      m_resetControlsButton(nullptr),
       m_running(false),
       m_blockUiSignals(false),
       m_applyLoadedControlValues(false)
@@ -899,7 +935,7 @@ void V4L2SettingsDialog::onRefreshClicked()
     refreshDevices();
 }
 
-void V4L2SettingsDialog::onReadControlsClicked()
+void V4L2SettingsDialog::readControlClass(const QString &className)
 {
     const auto deviceInfo = selectedDevice();
     if (!deviceInfo.isValid())
@@ -915,19 +951,38 @@ void V4L2SettingsDialog::onReadControlsClicked()
     auto queriedControls = device.queryControls(&error);
     if (queriedControls.isEmpty() && !error.isEmpty())
         QMessageBox::warning(this, QStringLiteral("V4L2 Camera"), error);
-    rebuildControls(queriedControls);
+
+    QSet<quint32> affectedIds;
+    for (const auto &control : queriedControls) {
+        if (control.isClassMarker() || control.isDisabled())
+            continue;
+        if (control.className() == className && m_controlWidgets.contains(control.id))
+            affectedIds.insert(control.id);
+    }
+    updateControls(queriedControls, affectedIds);
 }
 
-void V4L2SettingsDialog::onResetControlsClicked()
+void V4L2SettingsDialog::resetControlClass(const QString &className)
 {
     const auto values = m_desiredValues;
+    QList<quint32> ids;
     for (auto it = m_controls.begin(); it != m_controls.end(); ++it) {
         const auto &control = it.value();
+        if (control.className() != className)
+            continue;
         if (!control.restorable())
             continue;
         if (V4L2Camera::isManualDependentActive(control.id, values))
             continue;
-        handleControlEdited(control.id, control.defaultValue);
+        if (values.value(control.id, control.currentValue) == control.defaultValue)
+            continue;
+        ids.append(control.id);
+    }
+
+    std::sort(ids.begin(), ids.end());
+    for (const auto id : ids) {
+        if (m_controls.contains(id))
+            handleControlEdited(id, m_controls.value(id).defaultValue);
     }
 }
 
@@ -970,24 +1025,15 @@ void V4L2SettingsDialog::buildUi()
     captureLayout->addStretch();
     m_tabs->addTab(m_captureTab, QStringLiteral("Capture"));
 
-    auto *buttonsLayout = new QHBoxLayout;
-    buttonsLayout->addStretch();
-    m_readControlsButton = new QPushButton(QStringLiteral("Read Current"), this);
-    m_resetControlsButton = new QPushButton(QStringLiteral("Reset Controls"), this);
-    buttonsLayout->addWidget(m_readControlsButton);
-    buttonsLayout->addWidget(m_resetControlsButton);
-    mainLayout->addLayout(buttonsLayout);
-
     connect(m_deviceCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &V4L2SettingsDialog::onDeviceChanged);
     connect(m_modeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &V4L2SettingsDialog::onModeChanged);
     connect(m_refreshButton, &QPushButton::clicked, this, &V4L2SettingsDialog::onRefreshClicked);
-    connect(m_readControlsButton, &QPushButton::clicked, this, &V4L2SettingsDialog::onReadControlsClicked);
-    connect(m_resetControlsButton, &QPushButton::clicked, this, &V4L2SettingsDialog::onResetControlsClicked);
 }
 
 void V4L2SettingsDialog::clearControlTabs()
 {
     m_controlWidgets.clear();
+    m_classResetButtons.clear();
     while (m_tabs->count() > 1) {
         auto *widget = m_tabs->widget(1);
         m_tabs->removeTab(1);
@@ -1064,6 +1110,24 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
             layout->setContentsMargins(10, 10, 10, 10);
             layout->setSpacing(6);
             page->setLayout(layout);
+
+            auto *buttonsRow = new QWidget(page);
+            auto *buttonsLayout = new QHBoxLayout(buttonsRow);
+            buttonsLayout->setContentsMargins(0, 0, 0, 4);
+            buttonsLayout->addStretch();
+            auto *readButton = new QPushButton(QStringLiteral("Read Tab"), buttonsRow);
+            auto *resetButton = new QPushButton(QStringLiteral("Reset Tab"), buttonsRow);
+            buttonsLayout->addWidget(readButton);
+            buttonsLayout->addWidget(resetButton);
+            layout->addWidget(buttonsRow);
+            connect(readButton, &QPushButton::clicked, this, [this, className]() {
+                readControlClass(className);
+            });
+            connect(resetButton, &QPushButton::clicked, this, [this, className]() {
+                resetControlClass(className);
+            });
+            m_classResetButtons.insert(className, resetButton);
+
             scrollArea->setWidget(page);
             m_tabs->addTab(scrollArea, className);
             tabLayouts.insert(className, layout);
@@ -1093,7 +1157,13 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
     widgets.stateLabel = new QLabel(row);
     widgets.stateLabel->setMinimumWidth(70);
 
-    if (control.type == V4L2_CTRL_TYPE_BOOLEAN) {
+    const auto unsupportedReason = unsupportedControlReason(control);
+    if (!unsupportedReason.isEmpty()) {
+        auto *label = new QLabel(unsupportedReason, row);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+        widgets.editor = label;
+        grid->addWidget(label, 0, 1);
+    } else if (control.type == V4L2_CTRL_TYPE_BOOLEAN) {
         auto *checkBox = new QCheckBox(row);
         checkBox->setChecked(control.currentValue != 0);
         widgets.editor = checkBox;
@@ -1106,7 +1176,7 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
     } else if (control.type == V4L2_CTRL_TYPE_MENU || control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
         auto *comboBox = new QComboBox(row);
         for (const auto &entry : control.menu)
-            comboBox->addItem(entry.name, entry.value);
+            comboBox->addItem(menuEntryText(control, entry), entry.value);
         widgets.editor = comboBox;
         widgets.comboBox = comboBox;
         connect(comboBox, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, id = control.id](int index) {
@@ -1138,6 +1208,7 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
         auto *spinBox = new QSpinBox(editor);
         spinBox->setRange(static_cast<int>(control.minimum), static_cast<int>(control.maximum));
         spinBox->setSingleStep(intStep(control.step));
+        spinBox->setKeyboardTracking(false);
 
         layout->addWidget(slider, 1);
         layout->addWidget(spinBox);
@@ -1145,30 +1216,42 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
         widgets.slider = slider;
         widgets.spinBox = spinBox;
 
-        connect(slider, &QSlider::valueChanged, this, [this, id = control.id, spinBox](int value) {
+        connect(slider, &QSlider::valueChanged, this, [this, id = control.id, spinBox, slider](int value) {
             if (m_blockUiSignals)
                 return;
             QSignalBlocker blocker(spinBox);
             spinBox->setValue(value);
-            handleControlEdited(id, value);
+            if (!slider->isSliderDown())
+                handleControlEdited(id, value);
+        });
+        connect(slider, &QSlider::sliderReleased, this, [this, id = control.id, slider]() {
+            if (!m_blockUiSignals)
+                handleControlEdited(id, slider->value());
         });
         connect(spinBox, qOverload<int>(&QSpinBox::valueChanged), this, [this, id = control.id, slider](int value) {
             if (m_blockUiSignals)
                 return;
             QSignalBlocker blocker(slider);
             slider->setValue(value);
-            handleControlEdited(id, value);
+        });
+        connect(spinBox, &QAbstractSpinBox::editingFinished, this, [this, id = control.id, spinBox, slider]() {
+            if (m_blockUiSignals)
+                return;
+            QSignalBlocker blocker(slider);
+            slider->setValue(spinBox->value());
+            handleControlEdited(id, spinBox->value());
         });
         grid->addWidget(editor, 0, 1);
     } else if (control.type == V4L2_CTRL_TYPE_INTEGER && fitsInt(control.minimum) && fitsInt(control.maximum)) {
         auto *spinBox = new QSpinBox(row);
         spinBox->setRange(static_cast<int>(control.minimum), static_cast<int>(control.maximum));
         spinBox->setSingleStep(intStep(control.step));
+        spinBox->setKeyboardTracking(false);
         widgets.editor = spinBox;
         widgets.spinBox = spinBox;
-        connect(spinBox, qOverload<int>(&QSpinBox::valueChanged), this, [this, id = control.id](int value) {
+        connect(spinBox, &QAbstractSpinBox::editingFinished, this, [this, id = control.id, spinBox]() {
             if (!m_blockUiSignals)
-                handleControlEdited(id, value);
+                handleControlEdited(id, spinBox->value());
         });
         grid->addWidget(spinBox, 0, 1);
     } else if (isEditableNumericControl(control)) {
@@ -1222,11 +1305,17 @@ void V4L2SettingsDialog::setControlWidgetValue(quint32 id, qint64 value)
     if (widgets.checkBox != nullptr) {
         widgets.checkBox->setChecked(value != 0);
     } else if (widgets.comboBox != nullptr) {
+        bool found = false;
         for (int i = 0; i < widgets.comboBox->count(); ++i) {
             if (widgets.comboBox->itemData(i).toLongLong() == value) {
                 widgets.comboBox->setCurrentIndex(i);
+                found = true;
                 break;
             }
+        }
+        if (!found) {
+            widgets.comboBox->addItem(QStringLiteral("Unknown [raw: %1]").arg(rawControlValue(control, value)), value);
+            widgets.comboBox->setCurrentIndex(widgets.comboBox->count() - 1);
         }
     } else if (widgets.slider != nullptr && widgets.spinBox != nullptr && fitsInt(value)) {
         widgets.slider->setValue(static_cast<int>(value));
@@ -1310,6 +1399,7 @@ void V4L2SettingsDialog::updateSummary()
 
 void V4L2SettingsDialog::updateDependencyStates()
 {
+    QHash<QString, bool> classHasModifiedReset;
     for (auto it = m_controlWidgets.begin(); it != m_controlWidgets.end(); ++it) {
         const auto id = it.key();
         if (!m_controls.contains(id))
@@ -1321,6 +1411,8 @@ void V4L2SettingsDialog::updateDependencyStates()
         const bool readableValue = control.canRead();
         const bool copyableReadOnly = control.isReadOnly() && readableValue;
         const bool modified = m_desiredValues.value(id, control.currentValue) != control.defaultValue;
+        if (control.restorable() && !autoDisabled && !isGrabbed(control) && modified)
+            classHasModifiedReset.insert(control.className(), true);
 
         if (it->slider != nullptr)
             it->slider->setEnabled(writable);
@@ -1338,7 +1430,9 @@ void V4L2SettingsDialog::updateDependencyStates()
         if (it->resetButton != nullptr)
             it->resetButton->setEnabled(control.restorable() && !autoDisabled && !isGrabbed(control) && modified);
         if (it->stateLabel != nullptr) {
-            if (control.isReadOnly())
+            if (!unsupportedControlReason(control).isEmpty())
+                it->stateLabel->setText(QStringLiteral("Unsupported"));
+            else if (control.isReadOnly())
                 it->stateLabel->setText(QStringLiteral("Read-only"));
             else if (autoDisabled)
                 it->stateLabel->setText(QStringLiteral("Auto"));
@@ -1356,6 +1450,11 @@ void V4L2SettingsDialog::updateDependencyStates()
         else if (control.isButton() && !m_running)
             disabledReason = QStringLiteral("Button controls are only available while acquisition is running.");
         updateControlPresentation(id, disabledReason);
+    }
+
+    for (auto it = m_classResetButtons.begin(); it != m_classResetButtons.end(); ++it) {
+        if (it.value() != nullptr)
+            it.value()->setEnabled(classHasModifiedReset.value(it.key(), false));
     }
 }
 
