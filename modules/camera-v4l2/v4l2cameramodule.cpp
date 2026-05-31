@@ -16,9 +16,11 @@
 #include <QMutex>
 #include <QMutexLocker>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <linux/videodev2.h>
@@ -54,10 +56,50 @@ QString errnoString()
     return QString::fromLocal8Bit(std::strerror(errno));
 }
 
-bool requestMMapBuffers(int fd, std::vector<MMapBuffer> *buffers, QString *error)
+size_t estimatedFrameBufferSize(const V4L2Camera::CaptureMode &mode)
+{
+    if (mode.sizeImage > 0)
+        return mode.sizeImage;
+    if (mode.bytesPerLine > 0 && mode.height > 0)
+        return static_cast<size_t>(mode.bytesPerLine) * static_cast<size_t>(mode.height);
+    if (mode.width > 0 && mode.height > 0 && mode.cvType >= 0)
+        return static_cast<size_t>(mode.width) * static_cast<size_t>(mode.height) * CV_ELEM_SIZE(mode.cvType);
+    return 0;
+}
+
+quint32 requestedMMapBufferCount(const V4L2Camera::CaptureMode &mode)
+{
+    constexpr quint32 minBuffers = 2;
+    constexpr quint32 defaultMinQueue = 15;
+    constexpr quint32 hardMaxBuffers = 128;
+    constexpr size_t maxQueueBytes = 256ULL * 1024ULL * 1024ULL;
+
+    quint32 requested = defaultMinQueue;
+    const auto fps = mode.fps();
+    if (fps > static_cast<double>(defaultMinQueue))
+        requested = static_cast<quint32>(std::ceil(fps)) + 1;
+
+    requested = std::clamp(requested, minBuffers, hardMaxBuffers);
+
+    const auto frameBytes = estimatedFrameBufferSize(mode);
+    if (frameBytes > 0) {
+        const auto maxByMemory = std::max<quint32>(
+            minBuffers,
+            static_cast<quint32>(std::min<size_t>(hardMaxBuffers, maxQueueBytes / frameBytes)));
+        requested = std::min(requested, maxByMemory);
+    }
+
+    return std::max(requested, minBuffers);
+}
+
+bool requestMMapBuffers(
+    int fd,
+    const V4L2Camera::CaptureMode &mode,
+    std::vector<MMapBuffer> *buffers,
+    QString *error)
 {
     v4l2_requestbuffers req = {};
-    req.count = 6;
+    req.count = requestedMMapBufferCount(mode);
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
 
@@ -369,7 +411,8 @@ public:
             return;
         }
 
-        if (!requestMMapBuffers(device.fd(), &buffers, &error) || !queueAllBuffers(device.fd(), buffers.size(), &error)) {
+        if (!requestMMapBuffers(device.fd(), m_effectiveMode, &buffers, &error)
+            || !queueAllBuffers(device.fd(), buffers.size(), &error)) {
             raiseError(error);
             cleanup();
             return;

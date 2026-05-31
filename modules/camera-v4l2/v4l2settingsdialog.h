@@ -82,6 +82,7 @@ private:
     bool m_blockUiSignals;
     bool m_applyLoadedControlValues;
     V4L2Camera::DeviceIdentity m_loadedIdentity;
+    V4L2Camera::DeviceIdentity m_pendingIdentity;
     V4L2Camera::CaptureMode m_loadedMode;
     QHash<quint32, qint64> m_loadedControlValues;
     QHash<quint32, V4L2Camera::ControlInfo> m_controls;

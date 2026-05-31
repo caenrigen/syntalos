@@ -301,7 +301,14 @@ void V4L2SettingsDialog::refreshDevices()
         m_deviceCombo->addItem(device.displayName(), QVariant::fromValue(device));
 
     if (devices.isEmpty()) {
-        m_summaryLabel->setText(enumError.isEmpty() ? QStringLiteral("No V4L2 capture devices found.") : enumError);
+        if (!m_loadedIdentity.isValid() && previous.isValid())
+            m_pendingIdentity = previous;
+
+        QString message = enumError.isEmpty() ? QStringLiteral("No V4L2 capture devices found.") : enumError;
+        if (m_pendingIdentity.isValid())
+            message = QStringLiteral("%1\nWaiting for previously selected camera: %2.")
+                          .arg(message, m_pendingIdentity.displayName());
+        m_summaryLabel->setText(message);
         m_modeCombo->clear();
         clearControlTabs();
         return;
@@ -331,8 +338,28 @@ void V4L2SettingsDialog::refreshDevices()
             clearControlTabs();
             return;
         }
+    } else if (m_pendingIdentity.isValid()) {
+        match = V4L2Camera::matchDevice(m_pendingIdentity, devices, enumError);
+        if (!match.hasDevice()) {
+            m_deviceCombo->setCurrentIndex(-1);
+            m_summaryLabel->setText(
+                QStringLiteral("Waiting for previously selected V4L2 camera: %1.").arg(m_pendingIdentity.displayName()));
+            m_modeCombo->clear();
+            clearControlTabs();
+            return;
+        }
+        m_pendingIdentity = {};
     } else if (previous.isValid()) {
         match = V4L2Camera::matchDevice(previous, devices, enumError);
+        if (!match.hasDevice()) {
+            m_pendingIdentity = previous;
+            m_deviceCombo->setCurrentIndex(-1);
+            m_summaryLabel->setText(
+                QStringLiteral("Previously selected V4L2 camera is not available: %1.").arg(previous.displayName()));
+            m_modeCombo->clear();
+            clearControlTabs();
+            return;
+        }
     }
     if (!match.hasDevice())
         match = V4L2Camera::matchDevice({}, devices, enumError);
@@ -359,6 +386,7 @@ void V4L2SettingsDialog::serializeSettings(QVariantHash &settings) const
 void V4L2SettingsDialog::loadSettings(const QVariantHash &settings)
 {
     m_loadedIdentity = V4L2Camera::DeviceIdentity::fromVariant(settings.value(QStringLiteral("device_identity")).toHash());
+    m_pendingIdentity = {};
     m_loadedMode = V4L2Camera::CaptureMode::fromVariant(settings.value(QStringLiteral("capture_mode")).toHash());
     m_loadedControlValues.clear();
 
@@ -378,6 +406,8 @@ void V4L2SettingsDialog::onDeviceChanged(int index)
 {
     if (index < 0)
         return;
+
+    m_pendingIdentity = {};
 
     const auto deviceInfo = selectedDevice();
     m_controls.clear();
