@@ -497,16 +497,16 @@ QString manualModeReapplyNote(const V4L2Camera::ControlInfo &control)
     const auto table = V4L2Camera::autoDependencyTable();
     if (table.contains(control.id)) {
         return QStringLiteral(
-            "When this auto control is switched to manual/off, Syntalos reads dependent manual values and writes the "
-            "same values back once to keep reported and physical camera state aligned. This avoids divergence observed "
-            "on devices such as Logitech Webcam C930e.");
+            "When this auto control is switched to manual/off, Syntalos reads exposed dependent manual values and "
+            "writes the same values back once. This keeps reported and physical camera state aligned and is mainly "
+            "intended for focus controls on UVC cameras.");
     }
 
     for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
         if (it.value().contains(control.id)) {
             return QStringLiteral(
-                "When the related auto control is switched to manual/off, Syntalos re-applies this reported manual value "
-                "once to keep reported and physical camera state aligned.");
+                "When the related auto control is switched to manual/off, Syntalos re-applies this reported manual "
+                "value once to keep reported and physical camera state aligned.");
         }
     }
     return {};

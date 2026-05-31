@@ -843,6 +843,9 @@ private:
         const auto queriedControls = controlsById(controls);
 
         for (const auto dependentId : dependentIds) {
+            if (!m_controlMap.contains(dependentId))
+                continue;
+
             if (affectedRefreshIds != nullptr)
                 affectedRefreshIds->insert(dependentId);
 
@@ -923,8 +926,10 @@ private:
 
             affectedRefreshIds.insert(control.id);
             const auto dependentIds = dependencyTable.value(control.id);
-            for (const auto dependentId : dependentIds)
-                affectedRefreshIds.insert(dependentId);
+            for (const auto dependentId : dependentIds) {
+                if (m_controlMap.contains(dependentId))
+                    affectedRefreshIds.insert(dependentId);
+            }
             if (!dependentIds.isEmpty() && !V4L2Camera::autoControlEnabled(control.id, result.readbackValue))
                 reapplyManualDependentControls(device, control, dependencyTable, &desired, &affectedRefreshIds);
         }
