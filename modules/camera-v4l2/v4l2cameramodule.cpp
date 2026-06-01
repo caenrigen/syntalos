@@ -48,6 +48,11 @@ struct ScheduledManualReapply {
     std::chrono::steady_clock::time_point dueTime;
 };
 
+enum class ManualDependentReapplySource {
+    ReportedValue,
+    DesiredValue,
+};
+
 int xioctl(int fd, unsigned long request, void *arg)
 {
     int ret;
@@ -769,12 +774,24 @@ private:
             if (dependencyTable.contains(control.id) && !V4L2Camera::autoControlEnabled(control.id, result.readbackValue)) {
                 const auto delayMs = manualReapplyDelaysMs.value(control.id, 0);
                 if (delayMs == 0) {
-                    reapplyManualDependentControls(device, control, dependencyTable, &desired, nullptr);
+                    reapplyManualDependentControls(
+                        device,
+                        control,
+                        dependencyTable,
+                        &desired,
+                        nullptr,
+                        ManualDependentReapplySource::DesiredValue);
                 } else if (delayMs > 0) {
                     // During prepare/startup no frames are being dequeued yet, so waiting here honors saved
                     // startup control state without stalling live acquisition.
                     std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-                    reapplyManualDependentControls(device, control, dependencyTable, &desired, nullptr);
+                    reapplyManualDependentControls(
+                        device,
+                        control,
+                        dependencyTable,
+                        &desired,
+                        nullptr,
+                        ManualDependentReapplySource::DesiredValue);
                 }
             }
         }
@@ -900,7 +917,8 @@ private:
         const V4L2Camera::ControlInfo &autoControl,
         const QHash<quint32, QList<quint32>> &dependencyTable,
         QHash<quint32, qint64> *desired,
-        QSet<quint32> *affectedRefreshIds)
+        QSet<quint32> *affectedRefreshIds,
+        ManualDependentReapplySource valueSource)
     {
         const auto dependentIds = dependencyTable.value(autoControl.id);
         if (dependentIds.isEmpty())
@@ -908,8 +926,8 @@ private:
 
         // Some drivers expose dependent controls as writable before the hardware
         // has physically settled after auto mode is disabled. Delayed callers enter
-        // this function only after their configured wait, then query and write the
-        // freshly reported manual values.
+        // this function only after their configured wait, then query fresh control
+        // state before writing either saved desired values or reported manual values.
         auto controls = device.queryControls(nullptr);
         if (controls.isEmpty())
             return;
@@ -933,9 +951,13 @@ private:
 
             // Some UVC cameras, e.g. Logitech Webcam C930e, can report a manual
             // value after auto mode is disabled but keep using a different physical
-            // state until a manual value is written.
-            const auto reportedManualValue = dependent.currentValue;
-            const auto result = device.setControlValue(dependent, reportedManualValue);
+            // state until a manual value is written. During startup restore, keep
+            // saved desired values authoritative instead of replacing them with the
+            // driver's transient post-auto readback.
+            const bool useDesiredValue = valueSource == ManualDependentReapplySource::DesiredValue && desired != nullptr
+                && desired->contains(dependent.id);
+            const auto writeValue = useDesiredValue ? desired->value(dependent.id) : dependent.currentValue;
+            const auto result = device.setControlValue(dependent, writeValue);
             if (!result.success) {
                 logWarning(m_log, result.error);
                 continue;
@@ -981,7 +1003,13 @@ private:
                     desired->value(autoControl.id, autoControl.currentValue)))
                 continue;
 
-            reapplyManualDependentControls(device, autoControl, dependencyTable, desired, affectedRefreshIds);
+            reapplyManualDependentControls(
+                device,
+                autoControl,
+                dependencyTable,
+                desired,
+                affectedRefreshIds,
+                ManualDependentReapplySource::ReportedValue);
         }
     }
 
@@ -1052,7 +1080,13 @@ private:
                 if (!V4L2Camera::autoControlEnabled(control.id, result.readbackValue)) {
                     const auto delayMs = manualReapplyDelaysMs.value(control.id, 0);
                     if (delayMs == 0)
-                        reapplyManualDependentControls(device, control, dependencyTable, &desired, &affectedRefreshIds);
+                        reapplyManualDependentControls(
+                            device,
+                            control,
+                            dependencyTable,
+                            &desired,
+                            &affectedRefreshIds,
+                            ManualDependentReapplySource::ReportedValue);
                     else if (delayMs > 0)
                         scheduleManualDependentReapply(control.id, delayMs);
                 }
