@@ -34,6 +34,7 @@ public:
     V4L2Camera::CaptureMode selectedMode() const;
     QList<V4L2Camera::ControlInfo> controls() const;
     QHash<quint32, qint64> desiredControlValues() const;
+    QHash<quint32, int> manualReapplyDelaysMs() const;
 
     void setRunning(bool running);
     void setEffectiveMode(const V4L2Camera::CaptureMode &mode);
@@ -48,6 +49,7 @@ public:
 Q_SIGNALS:
     void controlValueChanged(quint32 id, qint64 value);
     void buttonControlTriggered(quint32 id);
+    void manualReapplyDelayChanged(quint32 id, int delayMs);
 
 private Q_SLOTS:
     void onDeviceChanged(int index);
@@ -65,6 +67,9 @@ private:
         QComboBox *comboBox = nullptr;
         QCheckBox *checkBox = nullptr;
         QPushButton *button = nullptr;
+        QLabel *manualReapplyDelayLabel = nullptr;
+        QSpinBox *manualReapplyDelaySpinBox = nullptr;
+        QPushButton *manualReapplyDelayResetButton = nullptr;
         QPushButton *resetButton = nullptr;
     };
 
@@ -85,6 +90,7 @@ private:
     QHash<quint32, qint64> m_loadedControlValues;
     QHash<quint32, V4L2Camera::ControlInfo> m_controls;
     QHash<quint32, qint64> m_desiredValues;
+    QHash<quint32, int> m_manualReapplyDelaysMs;
     QHash<quint32, ControlWidgets> m_controlWidgets;
     QHash<QString, QPushButton *> m_classResetButtons;
 
@@ -101,4 +107,5 @@ private:
     void updateSummary();
     void updateDependencyStates();
     QVariantList serializableControlSettings() const;
+    QVariantList serializableManualReapplyDelaySettings() const;
 };

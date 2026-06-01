@@ -29,6 +29,7 @@
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -40,6 +41,11 @@ namespace
 struct MMapBuffer {
     void *start = nullptr;
     size_t length = 0;
+};
+
+struct ScheduledManualReapply {
+    quint32 autoControlId = 0;
+    std::chrono::steady_clock::time_point dueTime;
 };
 
 int xioctl(int fd, unsigned long request, void *arg)
@@ -211,7 +217,9 @@ private:
     QMutex m_controlMutex;
     QHash<quint32, qint64> m_desiredControlValues;
     QHash<quint32, qint64> m_pendingControlWrites;
+    QHash<quint32, int> m_manualReapplyDelaysMs;
     QList<quint32> m_pendingButtonControls;
+    QList<ScheduledManualReapply> m_scheduledManualReapplies;
 
 public:
     explicit V4L2CameraModule(QObject *parent = nullptr)
@@ -238,6 +246,10 @@ public:
                 return;
             QMutexLocker locker(&m_controlMutex);
             m_pendingButtonControls.append(id);
+        });
+        connect(m_settingsDialog, &V4L2SettingsDialog::manualReapplyDelayChanged, this, [this](quint32 id, int delayMs) {
+            QMutexLocker locker(&m_controlMutex);
+            m_manualReapplyDelaysMs[id] = delayMs;
         });
     }
 
@@ -268,7 +280,9 @@ public:
             QMutexLocker locker(&m_controlMutex);
             m_pendingControlWrites.clear();
             m_pendingButtonControls.clear();
+            m_manualReapplyDelaysMs = m_settingsDialog->manualReapplyDelaysMs();
         }
+        m_scheduledManualReapplies.clear();
 
         auto wantedDevice = m_settingsDialog->selectedDevice();
         QString matchWarning;
@@ -299,6 +313,7 @@ public:
         {
             QMutexLocker locker(&m_controlMutex);
             m_desiredControlValues = m_settingsDialog->desiredControlValues();
+            m_manualReapplyDelaysMs = m_settingsDialog->manualReapplyDelaysMs();
         }
 
         V4L2Camera::Device device;
@@ -458,7 +473,7 @@ public:
             fds[1].fd = stopFd;
             fds[1].events = POLLIN;
 
-            const int pollResult = poll(fds, 2, 1000);
+            const int pollResult = poll(fds, 2, controlPollTimeoutMs());
             if (pollResult < 0) {
                 if (errno == EINTR)
                     continue;
@@ -689,9 +704,11 @@ private:
     void applyDesiredControls(V4L2Camera::Device &device, QList<V4L2Camera::ControlInfo> *controls)
     {
         QHash<quint32, qint64> desired;
+        QHash<quint32, int> manualReapplyDelaysMs;
         {
             QMutexLocker locker(&m_controlMutex);
             desired = m_desiredControlValues;
+            manualReapplyDelaysMs = m_manualReapplyDelaysMs;
         }
 
         if (desired.contains(V4L2_CID_EXPOSURE_AUTO_PRIORITY) && desired.value(V4L2_CID_EXPOSURE_AUTO_PRIORITY) != 0) {
@@ -741,8 +758,17 @@ private:
                         .arg(result.requestedValue));
             }
 
-            if (dependencyTable.contains(control.id) && !V4L2Camera::autoControlEnabled(control.id, result.readbackValue))
-                reapplyManualDependentControls(device, control, dependencyTable, &desired, nullptr);
+            if (dependencyTable.contains(control.id) && !V4L2Camera::autoControlEnabled(control.id, result.readbackValue)) {
+                const auto delayMs = manualReapplyDelaysMs.value(control.id, 0);
+                if (delayMs == 0) {
+                    reapplyManualDependentControls(device, control, dependencyTable, &desired, nullptr);
+                } else if (delayMs > 0) {
+                    // During prepare/startup no frames are being dequeued yet, so waiting here honors saved
+                    // startup control state without stalling live acquisition.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                    reapplyManualDependentControls(device, control, dependencyTable, &desired, nullptr);
+                }
+            }
         }
 
         {
@@ -825,6 +851,42 @@ private:
         return ids;
     }
 
+    int controlPollTimeoutMs() const
+    {
+        constexpr int defaultTimeoutMs = 1000;
+        if (m_scheduledManualReapplies.isEmpty())
+            return defaultTimeoutMs;
+
+        const auto now = std::chrono::steady_clock::now();
+        auto nextDue = m_scheduledManualReapplies.constFirst().dueTime;
+        for (const auto &pending : m_scheduledManualReapplies)
+            nextDue = std::min(nextDue, pending.dueTime);
+
+        if (nextDue <= now)
+            return 0;
+
+        auto remainingMs = std::chrono::duration_cast<std::chrono::milliseconds>(nextDue - now).count();
+        if (remainingMs < 1)
+            remainingMs = 1;
+        return static_cast<int>(std::min<qint64>(defaultTimeoutMs, remainingMs));
+    }
+
+    void scheduleManualDependentReapply(quint32 autoControlId, int delayMs)
+    {
+        for (int i = m_scheduledManualReapplies.size() - 1; i >= 0; --i) {
+            if (m_scheduledManualReapplies.at(i).autoControlId == autoControlId)
+                m_scheduledManualReapplies.removeAt(i);
+        }
+
+        if (delayMs <= 0)
+            return;
+
+        ScheduledManualReapply pending;
+        pending.autoControlId = autoControlId;
+        pending.dueTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+        m_scheduledManualReapplies.append(pending);
+    }
+
     void reapplyManualDependentControls(
         V4L2Camera::Device &device,
         const V4L2Camera::ControlInfo &autoControl,
@@ -836,6 +898,10 @@ private:
         if (dependentIds.isEmpty())
             return;
 
+        // Some drivers expose dependent controls as writable before the hardware
+        // has physically settled after auto mode is disabled. Delayed callers enter
+        // this function only after their configured wait, then query and write the
+        // freshly reported manual values.
         auto controls = device.queryControls(nullptr);
         if (controls.isEmpty())
             return;
@@ -874,11 +940,49 @@ private:
         }
     }
 
+    void applyDueManualReapplies(
+        V4L2Camera::Device &device,
+        const QHash<quint32, QList<quint32>> &dependencyTable,
+        const QHash<quint32, int> &manualReapplyDelaysMs,
+        QHash<quint32, qint64> *desired,
+        QSet<quint32> *affectedRefreshIds)
+    {
+        if (m_scheduledManualReapplies.isEmpty())
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        QList<ScheduledManualReapply> due;
+        QList<ScheduledManualReapply> remaining;
+        for (const auto &pending : m_scheduledManualReapplies) {
+            if (pending.dueTime <= now)
+                due.append(pending);
+            else
+                remaining.append(pending);
+        }
+        m_scheduledManualReapplies = remaining;
+
+        for (const auto &pending : due) {
+            if (manualReapplyDelaysMs.value(pending.autoControlId, 0) < 0)
+                continue;
+            if (!m_controlMap.contains(pending.autoControlId))
+                continue;
+
+            const auto autoControl = m_controlMap.value(pending.autoControlId);
+            if (V4L2Camera::autoControlEnabled(
+                    autoControl.id,
+                    desired->value(autoControl.id, autoControl.currentValue)))
+                continue;
+
+            reapplyManualDependentControls(device, autoControl, dependencyTable, desired, affectedRefreshIds);
+        }
+    }
+
     void applyPendingControlWrites(V4L2Camera::Device &device)
     {
         QHash<quint32, qint64> pending;
         QList<quint32> pendingButtons;
         QHash<quint32, qint64> desired;
+        QHash<quint32, int> manualReapplyDelaysMs;
         {
             QMutexLocker locker(&m_controlMutex);
             pending = m_pendingControlWrites;
@@ -886,9 +990,14 @@ private:
             pendingButtons = m_pendingButtonControls;
             m_pendingButtonControls.clear();
             desired = m_desiredControlValues;
+            manualReapplyDelaysMs = m_manualReapplyDelaysMs;
         }
 
-        if (pending.isEmpty() && pendingButtons.isEmpty())
+        const auto hasDueManualReapplies = std::any_of(
+            m_scheduledManualReapplies.constBegin(),
+            m_scheduledManualReapplies.constEnd(),
+            [](const auto &pending) { return pending.dueTime <= std::chrono::steady_clock::now(); });
+        if (pending.isEmpty() && pendingButtons.isEmpty() && !hasDueManualReapplies)
             return;
 
         QSet<quint32> affectedRefreshIds;
@@ -930,8 +1039,16 @@ private:
                 if (m_controlMap.contains(dependentId))
                     affectedRefreshIds.insert(dependentId);
             }
-            if (!dependentIds.isEmpty() && !V4L2Camera::autoControlEnabled(control.id, result.readbackValue))
-                reapplyManualDependentControls(device, control, dependencyTable, &desired, &affectedRefreshIds);
+            if (!dependentIds.isEmpty()) {
+                scheduleManualDependentReapply(control.id, 0);
+                if (!V4L2Camera::autoControlEnabled(control.id, result.readbackValue)) {
+                    const auto delayMs = manualReapplyDelaysMs.value(control.id, 0);
+                    if (delayMs == 0)
+                        reapplyManualDependentControls(device, control, dependencyTable, &desired, &affectedRefreshIds);
+                    else if (delayMs > 0)
+                        scheduleManualDependentReapply(control.id, delayMs);
+                }
+            }
         }
 
         for (const auto id : pendingButtons) {
@@ -943,6 +1060,8 @@ private:
             if (!device.triggerButtonControl(control, &error))
                 logWarning(m_log, error);
         }
+
+        applyDueManualReapplies(device, dependencyTable, manualReapplyDelaysMs, &desired, &affectedRefreshIds);
 
         {
             QMutexLocker locker(&m_controlMutex);

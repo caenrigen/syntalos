@@ -47,6 +47,11 @@ int intStep(qint64 step)
     return static_cast<int>(step);
 }
 
+int clampManualReapplyDelayMs(int value)
+{
+    return std::clamp(value, -1, 9999);
+}
+
 bool isIntegerControl(const V4L2Camera::ControlInfo &control)
 {
     return control.type == V4L2_CTRL_TYPE_INTEGER || control.type == V4L2_CTRL_TYPE_INTEGER64;
@@ -497,16 +502,16 @@ QString manualModeReapplyNote(const V4L2Camera::ControlInfo &control)
     const auto table = V4L2Camera::autoDependencyTable();
     if (table.contains(control.id)) {
         return QStringLiteral(
-            "When this auto control is switched to manual/off, Syntalos reads exposed dependent manual values and "
-            "writes the same values back once. This keeps reported and physical camera state aligned and is mainly "
-            "intended for focus controls on UVC cameras.");
+            "When this auto control is switched to manual/off, Syntalos can read exposed dependent manual values and "
+            "write the same values back once after the configured delay. This keeps reported and physical camera state "
+            "aligned on cameras whose hardware settles after the driver reports write readiness.");
     }
 
     for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
         if (it.value().contains(control.id)) {
             return QStringLiteral(
-                "When the related auto control is switched to manual/off, Syntalos re-applies this reported manual "
-                "value once to keep reported and physical camera state aligned.");
+                "When the related auto control is switched to manual/off, Syntalos can re-apply this reported manual "
+                "value once after that auto control's configured delay.");
         }
     }
     return {};
@@ -521,6 +526,17 @@ QString wrappedTooltip(const QStringList &lines)
 
     return QStringLiteral("<qt><div style=\"width: 520px; white-space: normal;\">%1</div></qt>")
         .arg(escapedLines.join(QStringLiteral("<br/>")));
+}
+
+QString manualReapplyDelayTooltip(const V4L2Camera::ControlInfo &control)
+{
+    return wrappedTooltip({
+        QStringLiteral("Manual sibling write delay for %1.").arg(control.name),
+        QStringLiteral("-1 disables the automatic writes to dependent manual controls."),
+        QStringLiteral("0 writes dependent manual controls immediately after switching this auto control to manual/off."),
+        QStringLiteral(
+            "Positive values wait that many milliseconds, then read dependent controls and write the freshly reported values."),
+    });
 }
 
 QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &disabledReason = QString())
@@ -563,7 +579,7 @@ QString controlCommitInfoText()
 {
     return QStringLiteral(
         "Device writes: sliders on release; spinboxes/text boxes on Enter or focus-out; menus/checkboxes immediately; "
-        "Trigger/Reset on click.");
+        "Trigger/Reset on click; auto-to-manual sibling writes follow the delay field beside auto controls.");
 }
 
 bool shouldUseSlider(const V4L2Camera::ControlInfo &control)
@@ -755,6 +771,11 @@ QHash<quint32, qint64> V4L2SettingsDialog::desiredControlValues() const
     return m_desiredValues;
 }
 
+QHash<quint32, int> V4L2SettingsDialog::manualReapplyDelaysMs() const
+{
+    return m_manualReapplyDelaysMs;
+}
+
 void V4L2SettingsDialog::setRunning(bool running)
 {
     m_running = running;
@@ -913,6 +934,7 @@ void V4L2SettingsDialog::serializeSettings(QVariantHash &settings) const
     settings.insert(QStringLiteral("device_identity"), identity.toVariant());
     settings.insert(QStringLiteral("capture_mode"), mode.toVariant());
     settings.insert(QStringLiteral("control_values"), serializableControlSettings());
+    settings.insert(QStringLiteral("manual_reapply_delays_ms"), serializableManualReapplyDelaySettings());
 }
 
 void V4L2SettingsDialog::loadSettings(const QVariantHash &settings)
@@ -921,6 +943,7 @@ void V4L2SettingsDialog::loadSettings(const QVariantHash &settings)
     m_pendingIdentity = {};
     m_loadedMode = V4L2Camera::CaptureMode::fromVariant(settings.value(QStringLiteral("capture_mode")).toHash());
     m_loadedControlValues.clear();
+    m_manualReapplyDelaysMs.clear();
 
     const auto controlValues = settings.value(QStringLiteral("control_values")).toList();
     for (const auto &entryVar : controlValues) {
@@ -929,6 +952,15 @@ void V4L2SettingsDialog::loadSettings(const QVariantHash &settings)
         if (id == 0)
             continue;
         m_loadedControlValues[id] = entry.value(QStringLiteral("value")).toLongLong();
+    }
+
+    const auto delayValues = settings.value(QStringLiteral("manual_reapply_delays_ms")).toList();
+    for (const auto &entryVar : delayValues) {
+        const auto entry = entryVar.toHash();
+        const quint32 id = entry.value(QStringLiteral("id")).toUInt();
+        if (id == 0 || !V4L2Camera::autoDependencyTable().contains(id))
+            continue;
+        m_manualReapplyDelaysMs[id] = clampManualReapplyDelayMs(entry.value(QStringLiteral("delay_ms")).toInt());
     }
 
     refreshDevices();
@@ -1320,6 +1352,37 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
         grid->addWidget(label, 0, 1);
     }
 
+    if (unsupportedReason.isEmpty() && V4L2Camera::autoDependencyTable().contains(control.id)) {
+        auto *delayLabel = new QLabel(QStringLiteral("%1: Manual dependents reapply delay").arg(control.name), row);
+        delayLabel->setToolTip(manualReapplyDelayTooltip(control));
+
+        auto *delaySpinBox = new QSpinBox(row);
+        delaySpinBox->setRange(-1, 9999);
+        delaySpinBox->setSuffix(QStringLiteral(" ms"));
+        delaySpinBox->setKeyboardTracking(false);
+        delaySpinBox->setMinimumWidth(90);
+        delaySpinBox->setAccessibleName(delayLabel->text());
+        delaySpinBox->setToolTip(manualReapplyDelayTooltip(control));
+        delaySpinBox->setValue(m_manualReapplyDelaysMs.value(control.id, 0));
+        widgets.manualReapplyDelayLabel = delayLabel;
+        widgets.manualReapplyDelaySpinBox = delaySpinBox;
+        auto *delayResetButton = new QPushButton(QStringLiteral("Reset"), row);
+        delayResetButton->setToolTip(QStringLiteral("Reset reapply delay to 0 ms."));
+        widgets.manualReapplyDelayResetButton = delayResetButton;
+        connect(delaySpinBox, qOverload<int>(&QSpinBox::valueChanged), this, [this, id = control.id, delayResetButton](int value) {
+            const auto delayMs = clampManualReapplyDelayMs(value);
+            m_manualReapplyDelaysMs[id] = delayMs;
+            delayResetButton->setEnabled(delayMs != 0);
+            Q_EMIT manualReapplyDelayChanged(id, delayMs);
+        });
+        connect(delayResetButton, &QPushButton::clicked, this, [delaySpinBox]() {
+            delaySpinBox->setValue(0);
+        });
+        grid->addWidget(delayLabel, 1, 0);
+        grid->addWidget(delaySpinBox, 1, 1);
+        grid->addWidget(delayResetButton, 1, 2);
+    }
+
     widgets.resetButton = new QPushButton(QStringLiteral("Reset"), row);
     connect(widgets.resetButton, &QPushButton::clicked, this, [this, id = control.id]() {
         if (m_controls.contains(id))
@@ -1406,6 +1469,18 @@ void V4L2SettingsDialog::updateControlPresentation(quint32 id, const QString &di
     applyTooltip(widgets.comboBox);
     applyTooltip(widgets.checkBox);
     applyTooltip(widgets.button);
+    if (widgets.manualReapplyDelayLabel != nullptr || widgets.manualReapplyDelaySpinBox != nullptr) {
+        const auto delayTooltip = manualReapplyDelayTooltip(control);
+        if (widgets.manualReapplyDelayLabel != nullptr)
+            widgets.manualReapplyDelayLabel->setToolTip(delayTooltip);
+        if (widgets.manualReapplyDelaySpinBox != nullptr)
+            widgets.manualReapplyDelaySpinBox->setToolTip(delayTooltip);
+    }
+    if (widgets.manualReapplyDelayResetButton != nullptr) {
+        widgets.manualReapplyDelayResetButton->setText(QStringLiteral("Reset"));
+        widgets.manualReapplyDelayResetButton->setToolTip(QStringLiteral("Reset reapply delay to 0 ms."));
+        widgets.manualReapplyDelayResetButton->setEnabled(m_manualReapplyDelaysMs.value(id, 0) != 0);
+    }
     if (widgets.resetButton != nullptr) {
         widgets.resetButton->setText(QStringLiteral("Reset"));
         widgets.resetButton->setToolTip(
@@ -1508,6 +1583,30 @@ QVariantList V4L2SettingsDialog::serializableControlSettings() const
         item.insert(QStringLiteral("maximum"), control.maximum);
         item.insert(QStringLiteral("step"), control.step);
         item.insert(QStringLiteral("menu"), menuEntries);
+        result.append(item);
+    }
+    return result;
+}
+
+QVariantList V4L2SettingsDialog::serializableManualReapplyDelaySettings() const
+{
+    QVariantList result;
+    const auto dependencyTable = V4L2Camera::autoDependencyTable();
+    for (auto it = m_manualReapplyDelaysMs.constBegin(); it != m_manualReapplyDelaysMs.constEnd(); ++it) {
+        if (!dependencyTable.contains(it.key()))
+            continue;
+        if (!m_controls.isEmpty() && !m_controls.contains(it.key()))
+            continue;
+
+        const auto delayMs = clampManualReapplyDelayMs(it.value());
+        if (delayMs == 0)
+            continue;
+
+        QVariantHash item;
+        item.insert(QStringLiteral("id"), static_cast<quint64>(it.key()));
+        item.insert(QStringLiteral("delay_ms"), delayMs);
+        if (m_controls.contains(it.key()))
+            item.insert(QStringLiteral("name"), m_controls.value(it.key()).name);
         result.append(item);
     }
     return result;
