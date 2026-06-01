@@ -116,13 +116,13 @@ QString hexId(quint32 value)
 
 int dependencySortKey(quint32 id)
 {
-    const auto table = V4L2Camera::autoDependencyTable();
-    int group = 0;
-    for (auto it = table.constBegin(); it != table.constEnd(); ++it, ++group) {
-        if (id == it.key())
-            return group * 10;
-        if (it.value().contains(id))
-            return group * 10 + 1;
+    int groupIndex = 0;
+    for (const auto &group : V4L2Camera::autoDependencyGroups()) {
+        if (id == group.autoControlId)
+            return groupIndex * 10;
+        if (group.manualControlIds.contains(id))
+            return groupIndex * 10 + 1;
+        ++groupIndex;
     }
     return 1000;
 }
@@ -520,31 +520,29 @@ QString autoDependencyTooltipLine(
     const V4L2Camera::ControlInfo &control,
     const QHash<quint32, V4L2Camera::ControlInfo> &controls)
 {
-    const auto table = V4L2Camera::autoDependencyTable();
-    if (table.contains(control.id)) {
-        return QStringLiteral("Dependent manual controls: %1")
-            .arg(dependencyControlNames(table.value(control.id), controls).join(QStringLiteral("; ")));
-    }
-
-    for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
-        if (it.value().contains(control.id))
-            return QStringLiteral("Controlled by auto control: %1").arg(dependencyControlName(it.key(), controls));
+    for (const auto &group : V4L2Camera::autoDependencyGroups()) {
+        if (group.autoControlId == control.id) {
+            return QStringLiteral("Dependent manual controls: %1")
+                .arg(dependencyControlNames(group.manualControlIds, controls).join(QStringLiteral("; ")));
+        }
+        if (group.manualControlIds.contains(control.id)) {
+            return QStringLiteral("Controlled by auto control: %1")
+                .arg(dependencyControlName(group.autoControlId, controls));
+        }
     }
     return {};
 }
 
 QString manualModeReapplyNote(const V4L2Camera::ControlInfo &control)
 {
-    const auto table = V4L2Camera::autoDependencyTable();
-    if (table.contains(control.id)) {
-        return QStringLiteral(
-            "When this auto control is switched to manual/off, Syntalos can read exposed dependent manual values and "
-            "write the same values back once after the configured delay. This keeps reported and physical camera state "
-            "aligned on cameras whose hardware settles after the driver reports write readiness.");
-    }
-
-    for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
-        if (it.value().contains(control.id)) {
+    for (const auto &group : V4L2Camera::autoDependencyGroups()) {
+        if (group.autoControlId == control.id) {
+            return QStringLiteral(
+                "When this auto control is switched to manual/off, Syntalos can read exposed dependent manual values and "
+                "write the same values back once after the configured delay. This keeps reported and physical camera state "
+                "aligned on cameras whose hardware settles after the driver reports write readiness.");
+        }
+        if (group.manualControlIds.contains(control.id)) {
             return QStringLiteral(
                 "When the related auto control is switched to manual/off, Syntalos can re-apply this reported manual "
                 "value once after that auto control's configured delay.");
@@ -647,16 +645,15 @@ QString autoDisabledReason(
     const QHash<quint32, V4L2Camera::ControlInfo> &controls,
     const QHash<quint32, qint64> &values)
 {
-    const auto table = V4L2Camera::autoDependencyTable();
-    for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
-        if (!it.value().contains(id))
+    for (const auto &group : V4L2Camera::autoDependencyGroups()) {
+        if (!group.manualControlIds.contains(id))
             continue;
 
-        const auto autoControlIt = controls.constFind(it.key());
-        const auto autoValueIt = values.constFind(it.key());
+        const auto autoControlIt = controls.constFind(group.autoControlId);
+        const auto autoValueIt = values.constFind(group.autoControlId);
         if (autoControlIt == controls.constEnd() || autoValueIt == values.constEnd())
             continue;
-        if (!V4L2Camera::autoControlEnabled(it.key(), autoValueIt.value()))
+        if (!V4L2Camera::autoControlEnabled(group.autoControlId, autoValueIt.value()))
             continue;
 
         return QStringLiteral("Disabled while %1 is enabled.").arg(autoControlIt->name);
@@ -1210,7 +1207,9 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
         const auto bKey = dependencySortKey(b.id);
         if (aKey != bKey)
             return aKey < bKey;
-        return a.name < b.name;
+        if (a.name != b.name)
+            return a.name < b.name;
+        return a.id < b.id;
     });
 
     QHash<QString, QVBoxLayout *> tabLayouts;

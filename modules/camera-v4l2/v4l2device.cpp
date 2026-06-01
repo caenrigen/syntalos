@@ -767,9 +767,9 @@ QString controlTypeName(quint32 type)
     }
 }
 
-QHash<quint32, QList<quint32>> autoDependencyTable()
+const QList<AutoDependencyGroup> &autoDependencyGroups()
 {
-    return {
+    static const QList<AutoDependencyGroup> groups = {
         {V4L2_CID_EXPOSURE_AUTO, {V4L2_CID_EXPOSURE_ABSOLUTE}},
         {V4L2_CID_AUTO_WHITE_BALANCE, {V4L2_CID_WHITE_BALANCE_TEMPERATURE, V4L2_CID_RED_BALANCE, V4L2_CID_BLUE_BALANCE}},
         {V4L2_CID_FOCUS_AUTO, {V4L2_CID_FOCUS_ABSOLUTE, V4L2_CID_FOCUS_RELATIVE}},
@@ -777,14 +777,26 @@ QHash<quint32, QList<quint32>> autoDependencyTable()
         {V4L2_CID_HUE_AUTO, {V4L2_CID_HUE}},
         {V4L2_CID_CHROMA_AGC, {V4L2_CID_CHROMA_GAIN}},
     };
+    return groups;
+}
+
+QHash<quint32, QList<quint32>> autoDependencyTable()
+{
+    QHash<quint32, QList<quint32>> table;
+    const auto &groups = autoDependencyGroups();
+    table.reserve(groups.size());
+    for (const auto &group : groups)
+        table.insert(group.autoControlId, group.manualControlIds);
+    return table;
 }
 
 QSet<quint32> autoControlIds()
 {
-    const auto table = autoDependencyTable();
     QSet<quint32> ids;
-    for (auto it = table.constBegin(); it != table.constEnd(); ++it)
-        ids.insert(it.key());
+    const auto &groups = autoDependencyGroups();
+    ids.reserve(groups.size());
+    for (const auto &group : groups)
+        ids.insert(group.autoControlId);
     return ids;
 }
 
@@ -797,12 +809,11 @@ bool autoControlEnabled(quint32 id, qint64 value)
 
 bool isManualDependentActive(quint32 id, const QHash<quint32, qint64> &values)
 {
-    const auto table = autoDependencyTable();
-    for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
-        if (!it.value().contains(id))
+    for (const auto &group : autoDependencyGroups()) {
+        if (!group.manualControlIds.contains(id))
             continue;
-        const auto autoIt = values.constFind(it.key());
-        if (autoIt != values.constEnd() && autoControlEnabled(it.key(), autoIt.value()))
+        const auto autoIt = values.constFind(group.autoControlId);
+        if (autoIt != values.constEnd() && autoControlEnabled(group.autoControlId, autoIt.value()))
             return true;
     }
     return false;

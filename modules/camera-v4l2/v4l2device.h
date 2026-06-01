@@ -134,12 +134,18 @@ struct ControlWriteResult {
     QString error;
 };
 
+struct AutoDependencyGroup {
+    quint32 autoControlId = 0;
+    QList<quint32> manualControlIds;
+};
+
 QString fourccToString(quint32 fourcc);
 quint32 fourccFromString(const QString &text);
 bool isSupportedFourcc(quint32 fourcc);
 int cvTypeForFourcc(quint32 fourcc);
 QString controlClassName(quint32 controlClass);
 QString controlTypeName(quint32 type);
+const QList<AutoDependencyGroup> &autoDependencyGroups();
 QHash<quint32, QList<quint32>> autoDependencyTable();
 QSet<quint32> autoControlIds();
 bool autoControlEnabled(quint32 id, qint64 value);
