@@ -626,8 +626,12 @@ QString controlTooltip(
 QString controlCommitInfoText()
 {
     return QStringLiteral(
-        "Device writes: sliders on release; spinboxes/text boxes on Enter or focus-out; menus/checkboxes immediately; "
-        "Trigger/Reset on click; auto-to-manual sibling writes follow the delay field below auto controls.");
+        "Control edits are desired values while not runnning; they are applied when the module prepares/starts. "
+        "While running, they are queued immediately.\n"
+        "Menus/checkboxes commit immediately; sliders on release or "
+        "keyboard changes; spinboxes/text boxes on Enter or focus-out.\n"
+        "When an auto control is switched off, manual "
+        "dependents are re-read and re-applied after the configured delay (-1 disables).");
 }
 
 bool shouldUseSlider(const V4L2Camera::ControlInfo &control)
