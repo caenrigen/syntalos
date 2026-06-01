@@ -415,7 +415,7 @@ public:
 
         const auto preparedEffectiveMode = m_effectiveMode;
         V4L2Camera::CaptureMode runEffectiveMode;
-        if (!configureDevice(device, &runEffectiveMode, &controls, &error, true)) {
+        if (!configureDevice(device, &runEffectiveMode, &controls, &error, false)) {
             raiseError(error);
             cleanup();
             return;
