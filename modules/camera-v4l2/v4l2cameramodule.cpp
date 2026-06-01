@@ -205,6 +205,26 @@ void logWarning(QuillLogger *log, const QString &message)
     LOG_WARNING(log, "{}", message.toStdString());
 }
 
+void signalEventFd(int fd)
+{
+    if (fd < 0)
+        return;
+
+    uint64_t value = 1;
+    const auto unused = ::write(fd, &value, sizeof(value));
+    Q_UNUSED(unused);
+}
+
+void drainEventFd(int fd)
+{
+    if (fd < 0)
+        return;
+
+    uint64_t value = 0;
+    while (::read(fd, &value, sizeof(value)) == sizeof(value)) {
+    }
+}
+
 } // namespace
 
 class V4L2CameraModule : public AbstractModule
@@ -217,6 +237,7 @@ private:
 
     std::atomic_bool m_stopped;
     std::atomic_int m_stopEventFd;
+    std::atomic_int m_controlEventFd;
     std::atomic_bool m_warnedReadbackMismatch;
     std::atomic_bool m_warnedTimestampFallback;
     std::atomic_bool m_warnedExposurePriority;
@@ -239,6 +260,7 @@ public:
           m_settingsDialog(new V4L2SettingsDialog),
           m_stopped(true),
           m_stopEventFd(-1),
+          m_controlEventFd(-1),
           m_warnedReadbackMismatch(false),
           m_warnedTimestampFallback(false),
           m_warnedExposurePriority(false)
@@ -249,15 +271,21 @@ public:
         connect(m_settingsDialog, &V4L2SettingsDialog::controlValueChanged, this, [this](quint32 id, qint64 value) {
             if (m_stopped.load())
                 return;
-            QMutexLocker locker(&m_controlMutex);
-            m_desiredControlValues[id] = value;
-            m_pendingControlWrites[id] = value;
+            {
+                QMutexLocker locker(&m_controlMutex);
+                m_desiredControlValues[id] = value;
+                m_pendingControlWrites[id] = value;
+            }
+            wakeControlThread();
         });
         connect(m_settingsDialog, &V4L2SettingsDialog::buttonControlTriggered, this, [this](quint32 id) {
             if (m_stopped.load())
                 return;
-            QMutexLocker locker(&m_controlMutex);
-            m_pendingButtonControls.append(id);
+            {
+                QMutexLocker locker(&m_controlMutex);
+                m_pendingButtonControls.append(id);
+            }
+            wakeControlThread();
         });
         connect(m_settingsDialog, &V4L2SettingsDialog::manualReapplyDelayChanged, this, [this](quint32 id, int delayMs) {
             QMutexLocker locker(&m_controlMutex);
@@ -377,7 +405,9 @@ public:
         auto clockSync = initClockSynchronizer(m_effectiveMode.fps());
 
         const int stopFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        const int controlFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         m_stopEventFd = stopFd;
+        m_controlEventFd = controlFd;
 
         auto cleanup = [&]() {
             if (streaming) {
@@ -390,6 +420,10 @@ public:
                 m_stopEventFd = -1;
                 ::close(stopFd);
             }
+            if (controlFd >= 0) {
+                m_controlEventFd = -1;
+                ::close(controlFd);
+            }
             safeStopSynchronizer(clockSync);
             QMetaObject::invokeMethod(m_settingsDialog, [this]() { m_settingsDialog->setRunning(false); }, Qt::QueuedConnection);
             m_stopped = true;
@@ -397,6 +431,11 @@ public:
 
         if (stopFd < 0) {
             raiseError(QStringLiteral("Unable to create V4L2 stop eventfd: %1").arg(errnoString()));
+            cleanup();
+            return;
+        }
+        if (controlFd < 0) {
+            raiseError(QStringLiteral("Unable to create V4L2 control eventfd: %1").arg(errnoString()));
             cleanup();
             return;
         }
@@ -480,13 +519,15 @@ public:
         while (m_running) {
             applyPendingControlWrites(device);
 
-            pollfd fds[2] = {};
+            pollfd fds[3] = {};
             fds[0].fd = device.fd();
             fds[0].events = POLLIN | POLLERR | POLLHUP;
             fds[1].fd = stopFd;
             fds[1].events = POLLIN;
+            fds[2].fd = controlFd;
+            fds[2].events = POLLIN;
 
-            const int pollResult = poll(fds, 2, controlPollTimeoutMs());
+            const int pollResult = poll(fds, 3, controlPollTimeoutMs());
             if (pollResult < 0) {
                 if (errno == EINTR)
                     continue;
@@ -497,10 +538,16 @@ public:
                 continue;
             if ((fds[1].revents & POLLIN) != 0)
                 break;
+            if ((fds[2].revents & POLLIN) != 0) {
+                drainEventFd(controlFd);
+                applyPendingControlWrites(device);
+            }
             if ((fds[0].revents & (POLLHUP | POLLNVAL)) != 0) {
                 raiseError(QStringLiteral("V4L2 camera disappeared or became invalid."));
                 break;
             }
+            if ((fds[0].revents & (POLLIN | POLLERR)) == 0)
+                continue;
 
             while (m_running) {
                 v4l2_buffer buf = {};
@@ -651,12 +698,7 @@ public:
         statusMessage(QStringLiteral("Cleaning up..."));
         m_running = false;
 
-        const int stopFd = m_stopEventFd.load();
-        if (stopFd >= 0) {
-            uint64_t value = 1;
-            const auto unused = ::write(stopFd, &value, sizeof(value));
-            Q_UNUSED(unused);
-        }
+        signalEventFd(m_stopEventFd.load());
 
         while (!m_stopped.load())
             appProcessEvents();
@@ -688,6 +730,11 @@ protected:
     }
 
 private:
+    void wakeControlThread()
+    {
+        signalEventFd(m_controlEventFd.load());
+    }
+
     bool configureDevice(
         V4L2Camera::Device &device,
         V4L2Camera::CaptureMode *effectiveMode,
