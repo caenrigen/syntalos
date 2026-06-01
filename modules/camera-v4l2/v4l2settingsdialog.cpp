@@ -622,17 +622,6 @@ QString controlTooltip(
     return wrappedTooltip(lines);
 }
 
-QString controlCommitInfoText()
-{
-    return QStringLiteral(
-        "Control edits are desired values while not running; they are applied when the module prepares/starts. "
-        "While running, they are queued to the capture thread.\n"
-        "Menus/checkboxes commit immediately; sliders on release or "
-        "keyboard changes; spinboxes/text boxes on Enter or focus-out.\n"
-        "When an auto control is switched off, manual "
-        "dependents are re-read and re-applied after the configured delay (-1 disables).");
-}
-
 bool shouldUseSlider(const V4L2Camera::ControlInfo &control)
 {
     if (control.type != V4L2_CTRL_TYPE_INTEGER)
@@ -1183,15 +1172,6 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
             layout->setContentsMargins(10, 10, 10, 10);
             layout->setSpacing(6);
             page->setLayout(layout);
-
-            auto *buttonsRow = new QWidget(page);
-            auto *buttonsLayout = new QHBoxLayout(buttonsRow);
-            buttonsLayout->setContentsMargins(0, 0, 0, 4);
-            auto *commitInfoLabel = new QLabel(controlCommitInfoText(), buttonsRow);
-            commitInfoLabel->setWordWrap(true);
-            commitInfoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            buttonsLayout->addWidget(commitInfoLabel);
-            layout->addWidget(buttonsRow);
 
             scrollArea->setWidget(page);
             m_tabs->addTab(scrollArea, className);

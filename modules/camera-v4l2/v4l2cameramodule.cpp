@@ -1005,11 +1005,10 @@ private:
             if (!dependent.canRead() || !dependent.canWrite())
                 continue;
 
-            // Some UVC cameras, e.g. Logitech Webcam C930e, can report a manual
-            // value after auto mode is disabled but keep using a different physical
-            // state until a manual value is written. During startup restore, keep
-            // saved desired values authoritative instead of replacing them with the
-            // driver's transient post-auto readback.
+            // Logitech Webcam C930e, reports a manual value after auto mode is disabled 
+            // but keeps using a different physical state until a manual value is written.
+            // During startup restore, keep saved desired values authoritative instead
+            // of replacing them with the driver's transient post-auto readback.
             const bool useDesiredValue = valueSource == ManualDependentReapplySource::DesiredValue && desired != nullptr
                 && desired->contains(dependent.id);
             const auto writeValue = useDesiredValue ? desired->value(dependent.id) : dependent.currentValue;
