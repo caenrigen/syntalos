@@ -118,6 +118,7 @@ struct ControlInfo {
     bool isReadOnly() const;
     bool isWriteOnly() const;
     bool isVolatile() const;
+    bool isExecuteOnWrite() const;
     bool isButton() const;
     bool canRead() const;
     bool canWrite() const;

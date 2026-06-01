@@ -651,6 +651,15 @@ bool ControlInfo::isVolatile() const
     return (flags & V4L2_CTRL_FLAG_VOLATILE) != 0;
 }
 
+bool ControlInfo::isExecuteOnWrite() const
+{
+#ifdef V4L2_CTRL_FLAG_EXECUTE_ON_WRITE
+    return (flags & V4L2_CTRL_FLAG_EXECUTE_ON_WRITE) != 0;
+#else
+    return false;
+#endif
+}
+
 bool ControlInfo::isButton() const
 {
     return type == V4L2_CTRL_TYPE_BUTTON;
@@ -668,7 +677,7 @@ bool ControlInfo::canWrite() const
 
 bool ControlInfo::restorable() const
 {
-    return canWrite() && !isButton() && !isVolatile();
+    return canWrite() && !isButton() && !isVolatile() && !isExecuteOnWrite();
 }
 
 QString ControlInfo::className() const
