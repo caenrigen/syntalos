@@ -101,7 +101,6 @@ private:
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
     void setControlWidgetValue(quint32 id, qint64 value);
     void handleControlEdited(quint32 id, qint64 value);
-    void readControlClass(const QString &className);
     void resetControlClass(const QString &className);
     void updateControlPresentation(quint32 id, const QString &disabledReason = QString());
     void updateSummary();

@@ -626,8 +626,8 @@ QString controlTooltip(
 QString controlCommitInfoText()
 {
     return QStringLiteral(
-        "Control edits are desired values while not runnning; they are applied when the module prepares/starts. "
-        "While running, they are queued immediately.\n"
+        "Control edits are desired values while not running; they are applied when the module prepares/starts. "
+        "While running, they are queued to the capture thread.\n"
         "Menus/checkboxes commit immediately; sliders on release or "
         "keyboard changes; spinboxes/text boxes on Enter or focus-out.\n"
         "When an auto control is switched off, manual "
@@ -1059,33 +1059,6 @@ void V4L2SettingsDialog::onRefreshClicked()
     refreshDevices();
 }
 
-void V4L2SettingsDialog::readControlClass(const QString &className)
-{
-    const auto deviceInfo = selectedDevice();
-    if (!deviceInfo.isValid())
-        return;
-
-    V4L2Camera::Device device;
-    QString error;
-    if (!device.open(deviceInfo.devicePath, &error)) {
-        QMessageBox::warning(this, QStringLiteral("V4L2 Camera"), error);
-        return;
-    }
-
-    auto queriedControls = device.queryControls(&error);
-    if (queriedControls.isEmpty() && !error.isEmpty())
-        QMessageBox::warning(this, QStringLiteral("V4L2 Camera"), error);
-
-    QSet<quint32> affectedIds;
-    for (const auto &control : queriedControls) {
-        if (control.isClassMarker() || control.isDisabled())
-            continue;
-        if (control.className() == className && m_controlWidgets.contains(control.id))
-            affectedIds.insert(control.id);
-    }
-    updateControls(queriedControls, affectedIds);
-}
-
 void V4L2SettingsDialog::resetControlClass(const QString &className)
 {
     const auto values = m_desiredValues;
@@ -1244,14 +1217,9 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
             commitInfoLabel->setWordWrap(true);
             commitInfoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
             buttonsLayout->addWidget(commitInfoLabel, 1);
-            auto *readButton = new QPushButton(QStringLiteral("Read Tab"), buttonsRow);
             auto *resetButton = new QPushButton(QStringLiteral("Reset Tab"), buttonsRow);
-            buttonsLayout->addWidget(readButton);
             buttonsLayout->addWidget(resetButton);
             layout->addWidget(buttonsRow);
-            connect(readButton, &QPushButton::clicked, this, [this, className]() {
-                readControlClass(className);
-            });
             connect(resetButton, &QPushButton::clicked, this, [this, className]() {
                 resetControlClass(className);
             });
