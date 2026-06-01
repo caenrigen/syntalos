@@ -591,7 +591,6 @@ QString controlTooltip(
     lines << QStringLiteral("API ID: %1").arg(controlApiId(control));
     lines << QStringLiteral("Class: %1").arg(control.className());
     lines << QStringLiteral("Type: %1").arg(V4L2Camera::controlTypeName(control.type));
-    lines << QStringLiteral("Current: %1").arg(formatControlValue(control, control.currentValue));
     lines << QStringLiteral("Default: %1").arg(formatControlValue(control, control.defaultValue));
     lines << QStringLiteral("Range: %1 to %2, step %3")
                  .arg(
