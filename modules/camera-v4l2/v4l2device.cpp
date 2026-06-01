@@ -1311,13 +1311,35 @@ bool Device::applyCaptureMode(const CaptureMode &wanted, CaptureMode *effective,
 
     v4l2_streamparm parm = {};
     parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(m_fd, VIDIOC_G_PARM, &parm) == 0) {
-        parm.parm.capture.timeperframe.numerator = wanted.timeperframeNum;
-        parm.parm.capture.timeperframe.denominator = wanted.timeperframeDen;
-        xioctl(m_fd, VIDIOC_S_PARM, &parm);
-        parm = {};
-        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        xioctl(m_fd, VIDIOC_G_PARM, &parm);
+    if (xioctl(m_fd, VIDIOC_G_PARM, &parm) < 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("VIDIOC_G_PARM failed before setting frame interval for %1: %2")
+                         .arg(wanted.displayName(), errnoString());
+        return false;
+    }
+
+    parm.parm.capture.timeperframe.numerator = wanted.timeperframeNum;
+    parm.parm.capture.timeperframe.denominator = wanted.timeperframeDen;
+    if (xioctl(m_fd, VIDIOC_S_PARM, &parm) < 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("VIDIOC_S_PARM failed for %1: %2").arg(wanted.displayName(), errnoString());
+        return false;
+    }
+
+    parm = {};
+    parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (xioctl(m_fd, VIDIOC_G_PARM, &parm) < 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("VIDIOC_G_PARM failed after setting frame interval for %1: %2")
+                         .arg(wanted.displayName(), errnoString());
+        return false;
+    }
+
+    if (parm.parm.capture.timeperframe.numerator == 0 || parm.parm.capture.timeperframe.denominator == 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("Device did not report a valid frame interval after VIDIOC_S_PARM for %1.")
+                         .arg(wanted.displayName());
+        return false;
     }
 
     CaptureMode actual = wanted;
@@ -1331,11 +1353,8 @@ bool Device::applyCaptureMode(const CaptureMode &wanted, CaptureMode *effective,
     actual.field = fmt.fmt.pix.field;
     actual.cvType = cvTypeForFourcc(actual.fourcc);
     actual.compressed = actual.fourcc == V4L2_PIX_FMT_MJPEG || actual.fourcc == v4l2_fourcc('M', 'J', 'P', 'G');
-
-    if (parm.parm.capture.timeperframe.numerator > 0 && parm.parm.capture.timeperframe.denominator > 0) {
-        actual.timeperframeNum = parm.parm.capture.timeperframe.numerator;
-        actual.timeperframeDen = parm.parm.capture.timeperframe.denominator;
-    }
+    actual.timeperframeNum = parm.parm.capture.timeperframe.numerator;
+    actual.timeperframeDen = parm.parm.capture.timeperframe.denominator;
 
     if (!isSupportedFourcc(actual.fourcc) || actual.width <= 0 || actual.height <= 0 || actual.fps() <= 0) {
         if (error != nullptr)
