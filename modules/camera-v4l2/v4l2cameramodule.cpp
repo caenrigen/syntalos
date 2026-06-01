@@ -510,8 +510,6 @@ public:
         std::optional<quint32> lastSequence;
         std::optional<nanoseconds_t> lastDriverTimestamp;
         std::optional<microseconds_t> lastFrameTime;
-        nanoseconds_t driverToMasterOffset{0};
-        bool driverOffsetKnown = false;
         bool useDriverTimestamps = true;
         const auto expectedFrameNs = nanoseconds_t(
             static_cast<int64_t>((1'000'000'000.0 * m_effectiveMode.timeperframeNum) / m_effectiveMode.timeperframeDen));
@@ -626,11 +624,6 @@ public:
                         microseconds_t frameTime = nsecToUsec(dequeueMasterNs);
 
                         if (timestampMonotonic && useDriverTimestamps && driverTimestamp.count() > 0) {
-                            if (!driverOffsetKnown) {
-                                driverToMasterOffset = dequeueMasterNs - driverTimestamp;
-                                driverOffsetKnown = true;
-                            }
-
                             bool sane = true;
                             if (lastDriverTimestamp.has_value()) {
                                 const auto delta = driverTimestamp - *lastDriverTimestamp;
@@ -639,7 +632,9 @@ public:
                             }
 
                             if (sane) {
-                                frameTime = nsecToUsec(driverTimestamp + driverToMasterOffset);
+                                // Match camera-lc: keep the observed master-side dequeue time as the initial
+                                // timestamp, and let the synchronizer use the kernel timestamp to remove jitter.
+                                frameTime = nsecToUsec(dequeueMasterNs);
                                 clockSync->processTimestamp(frameTime, nsecToUsec(driverTimestamp));
                                 lastDriverTimestamp = driverTimestamp;
                             } else {
