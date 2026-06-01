@@ -553,6 +553,7 @@ public:
 
                 if ((buf.flags & V4L2_BUF_FLAG_ERROR) != 0) {
                     droppedFrameCount++;
+                    invalidFrameCount++;
                     logWarning(m_log, QStringLiteral("Dropping V4L2 frame marked with V4L2_BUF_FLAG_ERROR."));
                 } else {
                     cv::Mat image;
@@ -621,7 +622,7 @@ public:
                 }
 
                 if (invalidFrameCount > 16) {
-                    raiseError(QStringLiteral("Too many V4L2 frame decode failures."));
+                    raiseError(QStringLiteral("Too many invalid V4L2 frames."));
                     m_running = false;
                     break;
                 }
