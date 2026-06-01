@@ -73,6 +73,13 @@ size_t estimatedFrameBufferSize(const V4L2Camera::CaptureMode &mode)
     return 0;
 }
 
+int64_t decodedFrameStrideBytes(const V4L2Camera::CaptureMode &mode)
+{
+    if (mode.width <= 0 || mode.cvType < 0)
+        return 0;
+    return static_cast<int64_t>(mode.width) * static_cast<int64_t>(CV_ELEM_SIZE(mode.cvType));
+}
+
 quint32 requestedMMapBufferCount(const V4L2Camera::CaptureMode &mode)
 {
     constexpr quint32 minBuffers = 2;
@@ -342,7 +349,8 @@ public:
         m_outStream->setMetadataValue("depth", static_cast<int64_t>(CV_MAT_DEPTH(m_effectiveMode.cvType)));
         m_outStream->setMetadataValue("has_color", CV_MAT_CN(m_effectiveMode.cvType) > 1);
         m_outStream->setMetadataValue("fourcc", m_effectiveMode.fourccString.toStdString());
-        m_outStream->setMetadataValue("stride", static_cast<int64_t>(m_effectiveMode.bytesPerLine));
+        m_outStream->setMetadataValue("stride", decodedFrameStrideBytes(m_effectiveMode));
+        m_outStream->setMetadataValue("v4l2_bytes_per_line", static_cast<int64_t>(m_effectiveMode.bytesPerLine));
         m_outStream->setMetadataValue("colorspace", static_cast<int64_t>(m_effectiveMode.colorspace));
         m_outStream->setMetadataValue("field", static_cast<int64_t>(m_effectiveMode.field));
         m_outStream->setMetadataValue("bayer_pattern", std::string("none"));
