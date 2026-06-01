@@ -24,6 +24,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <linux/videodev2.h>
+#include <memory>
 #include <optional>
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -245,6 +246,8 @@ private:
     V4L2Camera::DeviceIdentity m_device;
     V4L2Camera::CaptureMode m_requestedMode;
     V4L2Camera::CaptureMode m_effectiveMode;
+    QMutex m_deviceMutex;
+    std::unique_ptr<V4L2Camera::Device> m_preparedDevice;
     QHash<quint32, V4L2Camera::ControlInfo> m_controlMap;
 
     QMutex m_controlMutex;
@@ -317,6 +320,10 @@ public:
         m_warnedTimestampFallback = false;
         m_warnedExposurePriority = false;
         {
+            QMutexLocker locker(&m_deviceMutex);
+            m_preparedDevice.reset();
+        }
+        {
             QMutexLocker locker(&m_controlMutex);
             m_pendingControlWrites.clear();
             m_pendingButtonControls.clear();
@@ -356,10 +363,10 @@ public:
             m_manualReapplyDelaysMs = m_settingsDialog->manualReapplyDelaysMs();
         }
 
-        V4L2Camera::Device device;
+        auto preparedDevice = std::make_unique<V4L2Camera::Device>();
         QList<V4L2Camera::ControlInfo> controls;
         QString error;
-        if (!configureDevice(device, &m_effectiveMode, &controls, &error, true)) {
+        if (!configureDevice(*preparedDevice, &m_effectiveMode, &controls, &error, true)) {
             raiseError(error);
             return false;
         }
@@ -371,6 +378,10 @@ public:
         }
 
         updateControlMap(controls);
+        {
+            QMutexLocker locker(&m_deviceMutex);
+            m_preparedDevice = std::move(preparedDevice);
+        }
         m_settingsDialog->replaceControls(controls);
         m_settingsDialog->setEffectiveMode(m_effectiveMode);
         m_settingsDialog->setRunning(true);
@@ -397,12 +408,15 @@ public:
     {
         m_stopped = false;
 
-        V4L2Camera::Device device;
-        QList<V4L2Camera::ControlInfo> controls;
         QString error;
         bool streaming = false;
         std::vector<MMapBuffer> buffers;
         auto clockSync = initClockSynchronizer(m_effectiveMode.fps());
+        std::unique_ptr<V4L2Camera::Device> device;
+        {
+            QMutexLocker locker(&m_deviceMutex);
+            device = std::move(m_preparedDevice);
+        }
 
         const int stopFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         const int controlFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -410,12 +424,14 @@ public:
         m_controlEventFd = controlFd;
 
         auto cleanup = [&]() {
-            if (streaming) {
+            const int deviceFd = device != nullptr ? device->fd() : -1;
+            if (streaming && deviceFd >= 0) {
                 int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                xioctl(device.fd(), VIDIOC_STREAMOFF, &type);
+                xioctl(deviceFd, VIDIOC_STREAMOFF, &type);
                 streaming = false;
             }
-            releaseMMapBuffers(device.fd(), &buffers);
+            releaseMMapBuffers(deviceFd, &buffers);
+            device.reset();
             if (stopFd >= 0) {
                 m_stopEventFd = -1;
                 ::close(stopFd);
@@ -440,6 +456,12 @@ public:
             return;
         }
 
+        if (device == nullptr || !device->isOpen()) {
+            raiseError(QStringLiteral("No prepared V4L2 camera device is available for capture."));
+            cleanup();
+            return;
+        }
+
         if (!clockSync) {
             raiseError(QStringLiteral("Unable to set up clock synchronizer!"));
             cleanup();
@@ -452,25 +474,6 @@ public:
             return;
         }
 
-        const auto preparedEffectiveMode = m_effectiveMode;
-        V4L2Camera::CaptureMode runEffectiveMode;
-        if (!configureDevice(device, &runEffectiveMode, &controls, &error, false)) {
-            raiseError(error);
-            cleanup();
-            return;
-        }
-        // Stream metadata was committed in prepare(); abort if the second fd
-        // reports different metadata-bearing mode fields before streaming.
-        if (!effectiveModeMetadataMatches(preparedEffectiveMode, runEffectiveMode)) {
-            raiseError(
-                QStringLiteral("V4L2 effective mode changed between prepare and capture. Prepared: %1. Capture: %2.")
-                    .arg(effectiveModeMetadataSummary(preparedEffectiveMode), effectiveModeMetadataSummary(runEffectiveMode)));
-            cleanup();
-            return;
-        }
-        m_effectiveMode = runEffectiveMode;
-        updateControlMap(controls);
-
         V4L2Camera::FrameDecoder decoder;
         if (!decoder.configure(m_effectiveMode, &error)) {
             raiseError(error);
@@ -478,8 +481,8 @@ public:
             return;
         }
 
-        if (!requestMMapBuffers(device.fd(), m_effectiveMode, &buffers, &error)
-            || !queueAllBuffers(device.fd(), buffers.size(), &error)) {
+        if (!requestMMapBuffers(device->fd(), m_effectiveMode, &buffers, &error)
+            || !queueAllBuffers(device->fd(), buffers.size(), &error)) {
             raiseError(error);
             cleanup();
             return;
@@ -493,7 +496,7 @@ public:
         }
 
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (xioctl(device.fd(), VIDIOC_STREAMON, &type) < 0) {
+        if (xioctl(device->fd(), VIDIOC_STREAMON, &type) < 0) {
             raiseError(QStringLiteral("VIDIOC_STREAMON failed: %1").arg(errnoString()));
             cleanup();
             return;
@@ -517,10 +520,10 @@ public:
         uint64_t lastStatusFrame = 0;
 
         while (m_running) {
-            applyPendingControlWrites(device);
+            applyPendingControlWrites(*device);
 
             pollfd fds[3] = {};
-            fds[0].fd = device.fd();
+            fds[0].fd = device->fd();
             fds[0].events = POLLIN | POLLERR | POLLHUP;
             fds[1].fd = stopFd;
             fds[1].events = POLLIN;
@@ -540,7 +543,7 @@ public:
                 break;
             if ((fds[2].revents & POLLIN) != 0) {
                 drainEventFd(controlFd);
-                applyPendingControlWrites(device);
+                applyPendingControlWrites(*device);
             }
             if ((fds[0].revents & (POLLHUP | POLLNVAL)) != 0) {
                 raiseError(QStringLiteral("V4L2 camera disappeared or became invalid."));
@@ -554,7 +557,7 @@ public:
                 buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
                 buf.memory = V4L2_MEMORY_MMAP;
 
-                if (xioctl(device.fd(), VIDIOC_DQBUF, &buf) < 0) {
+                if (xioctl(device->fd(), VIDIOC_DQBUF, &buf) < 0) {
                     if (errno == EAGAIN)
                         break;
                     if (errno == ENODEV || errno == EIO) {
@@ -662,7 +665,7 @@ public:
                     }
                 }
 
-                if (xioctl(device.fd(), VIDIOC_QBUF, &buf) < 0) {
+                if (xioctl(device->fd(), VIDIOC_QBUF, &buf) < 0) {
                     raiseError(QStringLiteral("VIDIOC_QBUF failed after frame processing: %1").arg(errnoString()));
                     m_running = false;
                     break;
@@ -699,6 +702,10 @@ public:
         m_running = false;
 
         signalEventFd(m_stopEventFd.load());
+        if (m_stopped.load()) {
+            QMutexLocker locker(&m_deviceMutex);
+            m_preparedDevice.reset();
+        }
 
         while (!m_stopped.load())
             appProcessEvents();
@@ -722,7 +729,7 @@ public:
 protected:
     void usbHotplugEvent(UsbHotplugEventKind kind) override
     {
-        if (!m_stopped)
+        if (!m_stopped || hasPreparedDevice())
             return;
         if (kind == UsbHotplugEventKind::DEVICE_ARRIVED || kind == UsbHotplugEventKind::DEVICES_CHANGE
             || kind == UsbHotplugEventKind::DEVICE_LEFT)
@@ -735,6 +742,12 @@ private:
         signalEventFd(m_controlEventFd.load());
     }
 
+    bool hasPreparedDevice()
+    {
+        QMutexLocker locker(&m_deviceMutex);
+        return m_preparedDevice != nullptr;
+    }
+
     bool configureDevice(
         V4L2Camera::Device &device,
         V4L2Camera::CaptureMode *effectiveMode,
@@ -742,7 +755,7 @@ private:
         QString *error,
         bool applyControls)
     {
-        if (!device.open(m_device.devicePath, error))
+        if (!device.isOpen() && !device.open(m_device.devicePath, error))
             return false;
 
         if (!device.applyCaptureMode(m_requestedMode, effectiveMode, error))
@@ -1197,31 +1210,6 @@ private:
             if (!control.isClassMarker())
                 m_controlMap.insert(control.id, control);
         }
-    }
-
-    static bool effectiveModeMetadataMatches(
-        const V4L2Camera::CaptureMode &preparedMode,
-        const V4L2Camera::CaptureMode &runMode)
-    {
-        return preparedMode.fourcc == runMode.fourcc && preparedMode.width == runMode.width
-            && preparedMode.height == runMode.height && preparedMode.timeperframeNum == runMode.timeperframeNum
-            && preparedMode.timeperframeDen == runMode.timeperframeDen && preparedMode.cvType == runMode.cvType
-            && preparedMode.bytesPerLine == runMode.bytesPerLine && preparedMode.colorspace == runMode.colorspace
-            && preparedMode.field == runMode.field;
-    }
-
-    static QString effectiveModeMetadataSummary(const V4L2Camera::CaptureMode &mode)
-    {
-        return QStringLiteral("%1 %2x%3 tpf %4/%5 stride %6 colorspace %7 field %8 cvType %9")
-            .arg(mode.fourccString)
-            .arg(mode.width)
-            .arg(mode.height)
-            .arg(mode.timeperframeNum)
-            .arg(mode.timeperframeDen)
-            .arg(mode.bytesPerLine)
-            .arg(mode.colorspace)
-            .arg(mode.field)
-            .arg(mode.cvType);
     }
 
     void warnOnce(std::atomic_bool *flag, const QString &title, const QString &message)
