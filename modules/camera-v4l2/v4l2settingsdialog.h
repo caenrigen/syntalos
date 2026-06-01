@@ -92,7 +92,6 @@ private:
     QHash<quint32, qint64> m_desiredValues;
     QHash<quint32, int> m_manualReapplyDelaysMs;
     QHash<quint32, ControlWidgets> m_controlWidgets;
-    QHash<QString, QPushButton *> m_classResetButtons;
 
     void buildUi();
     void clearControlTabs();
@@ -101,7 +100,6 @@ private:
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
     void setControlWidgetValue(quint32 id, qint64 value);
     void handleControlEdited(quint32 id, qint64 value);
-    void resetControlClass(const QString &className);
     void updateControlPresentation(quint32 id, const QString &disabledReason = QString());
     void updateSummary();
     void updateDependencyStates();

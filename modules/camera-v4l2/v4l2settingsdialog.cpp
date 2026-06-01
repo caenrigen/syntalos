@@ -1059,30 +1059,6 @@ void V4L2SettingsDialog::onRefreshClicked()
     refreshDevices();
 }
 
-void V4L2SettingsDialog::resetControlClass(const QString &className)
-{
-    const auto values = m_desiredValues;
-    QList<quint32> ids;
-    for (auto it = m_controls.begin(); it != m_controls.end(); ++it) {
-        const auto &control = it.value();
-        if (control.className() != className)
-            continue;
-        if (!control.restorable())
-            continue;
-        if (V4L2Camera::isManualDependentActive(control.id, values))
-            continue;
-        if (values.value(control.id, control.currentValue) == control.defaultValue)
-            continue;
-        ids.append(control.id);
-    }
-
-    std::sort(ids.begin(), ids.end());
-    for (const auto id : ids) {
-        if (m_controls.contains(id))
-            handleControlEdited(id, m_controls.value(id).defaultValue);
-    }
-}
-
 void V4L2SettingsDialog::buildUi()
 {
     setWindowTitle(QStringLiteral("V4L2 Camera Settings"));
@@ -1130,7 +1106,6 @@ void V4L2SettingsDialog::buildUi()
 void V4L2SettingsDialog::clearControlTabs()
 {
     m_controlWidgets.clear();
-    m_classResetButtons.clear();
     while (m_tabs->count() > 1) {
         auto *widget = m_tabs->widget(1);
         m_tabs->removeTab(1);
@@ -1216,14 +1191,8 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
             auto *commitInfoLabel = new QLabel(controlCommitInfoText(), buttonsRow);
             commitInfoLabel->setWordWrap(true);
             commitInfoLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            buttonsLayout->addWidget(commitInfoLabel, 1);
-            auto *resetButton = new QPushButton(QStringLiteral("Reset Tab"), buttonsRow);
-            buttonsLayout->addWidget(resetButton);
+            buttonsLayout->addWidget(commitInfoLabel);
             layout->addWidget(buttonsRow);
-            connect(resetButton, &QPushButton::clicked, this, [this, className]() {
-                resetControlClass(className);
-            });
-            m_classResetButtons.insert(className, resetButton);
 
             scrollArea->setWidget(page);
             m_tabs->addTab(scrollArea, className);
@@ -1533,7 +1502,6 @@ void V4L2SettingsDialog::updateSummary()
 
 void V4L2SettingsDialog::updateDependencyStates()
 {
-    QHash<QString, bool> classHasModifiedReset;
     for (auto it = m_controlWidgets.begin(); it != m_controlWidgets.end(); ++it) {
         const auto id = it.key();
         if (!m_controls.contains(id))
@@ -1545,8 +1513,6 @@ void V4L2SettingsDialog::updateDependencyStates()
         const bool readableValue = control.canRead();
         const bool copyableReadOnly = control.isReadOnly() && readableValue;
         const bool modified = m_desiredValues.value(id, control.currentValue) != control.defaultValue;
-        if (control.restorable() && !autoDisabled && !isGrabbed(control) && modified)
-            classHasModifiedReset.insert(control.className(), true);
 
         if (it->slider != nullptr)
             it->slider->setEnabled(writable);
@@ -1569,11 +1535,6 @@ void V4L2SettingsDialog::updateDependencyStates()
         else if (control.isButton() && !m_running)
             disabledReason = QStringLiteral("Button controls are only available while acquisition is running.");
         updateControlPresentation(id, disabledReason);
-    }
-
-    for (auto it = m_classResetButtons.begin(); it != m_classResetButtons.end(); ++it) {
-        if (it.value() != nullptr)
-            it.value()->setEnabled(classHasModifiedReset.value(it.key(), false));
     }
 }
 
