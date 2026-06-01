@@ -497,6 +497,42 @@ QString unsupportedControlReason(const V4L2Camera::ControlInfo &control)
     return {};
 }
 
+QString dependencyControlName(quint32 id, const QHash<quint32, V4L2Camera::ControlInfo> &controls)
+{
+    const auto it = controls.constFind(id);
+    if (it != controls.constEnd() && !it->name.isEmpty())
+        return it->name;
+
+    const auto symbolicName = symbolicControlName(id);
+    return symbolicName.isEmpty() ? hexId(id) : QStringLiteral("%1 (%2)").arg(symbolicName, hexId(id));
+}
+
+QStringList dependencyControlNames(const QList<quint32> &ids, const QHash<quint32, V4L2Camera::ControlInfo> &controls)
+{
+    QStringList names;
+    names.reserve(ids.size());
+    for (const auto id : ids)
+        names.append(dependencyControlName(id, controls));
+    return names;
+}
+
+QString autoDependencyTooltipLine(
+    const V4L2Camera::ControlInfo &control,
+    const QHash<quint32, V4L2Camera::ControlInfo> &controls)
+{
+    const auto table = V4L2Camera::autoDependencyTable();
+    if (table.contains(control.id)) {
+        return QStringLiteral("Dependent manual controls: %1")
+            .arg(dependencyControlNames(table.value(control.id), controls).join(QStringLiteral("; ")));
+    }
+
+    for (auto it = table.constBegin(); it != table.constEnd(); ++it) {
+        if (it.value().contains(control.id))
+            return QStringLiteral("Controlled by auto control: %1").arg(dependencyControlName(it.key(), controls));
+    }
+    return {};
+}
+
 QString manualModeReapplyNote(const V4L2Camera::ControlInfo &control)
 {
     const auto table = V4L2Camera::autoDependencyTable();
@@ -528,18 +564,29 @@ QString wrappedTooltip(const QStringList &lines)
         .arg(escapedLines.join(QStringLiteral("<br/>")));
 }
 
-QString manualReapplyDelayTooltip(const V4L2Camera::ControlInfo &control)
+QString manualReapplyDelayTooltip(
+    const V4L2Camera::ControlInfo &control,
+    const QHash<quint32, V4L2Camera::ControlInfo> &controls)
 {
-    return wrappedTooltip({
+    QStringList lines = {
         QStringLiteral("Manual sibling write delay for %1.").arg(control.name),
         QStringLiteral("-1 disables the automatic writes to dependent manual controls."),
         QStringLiteral("0 writes dependent manual controls immediately after switching this auto control to manual/off."),
         QStringLiteral(
             "Positive values wait that many milliseconds, then read dependent controls and write the freshly reported values."),
-    });
+    };
+
+    const auto dependencyLine = autoDependencyTooltipLine(control, controls);
+    if (!dependencyLine.isEmpty())
+        lines << dependencyLine;
+
+    return wrappedTooltip(lines);
 }
 
-QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &disabledReason = QString())
+QString controlTooltip(
+    const V4L2Camera::ControlInfo &control,
+    const QHash<quint32, V4L2Camera::ControlInfo> &controls,
+    const QString &disabledReason = QString())
 {
     QStringList lines;
     lines << QStringLiteral("Name: %1").arg(control.name);
@@ -568,6 +615,9 @@ QString controlTooltip(const V4L2Camera::ControlInfo &control, const QString &di
         : (!unsupportedReason.isEmpty() ? unsupportedReason : staticControlStateReason(control));
     if (!stateReason.isEmpty())
         lines << QStringLiteral("State: %1").arg(stateReason);
+    const auto dependencyLine = autoDependencyTooltipLine(control, controls);
+    if (!dependencyLine.isEmpty())
+        lines << dependencyLine;
     const auto manualReapplyNote = manualModeReapplyNote(control);
     if (!manualReapplyNote.isEmpty())
         lines << QStringLiteral("Manual transition: %1").arg(manualReapplyNote);
@@ -579,7 +629,7 @@ QString controlCommitInfoText()
 {
     return QStringLiteral(
         "Device writes: sliders on release; spinboxes/text boxes on Enter or focus-out; menus/checkboxes immediately; "
-        "Trigger/Reset on click; auto-to-manual sibling writes follow the delay field beside auto controls.");
+        "Trigger/Reset on click; auto-to-manual sibling writes follow the delay field below auto controls.");
 }
 
 bool shouldUseSlider(const V4L2Camera::ControlInfo &control)
@@ -1354,7 +1404,7 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
 
     if (unsupportedReason.isEmpty() && V4L2Camera::autoDependencyTable().contains(control.id)) {
         auto *delayLabel = new QLabel(QStringLiteral("%1: Manual dependents reapply delay").arg(control.name), row);
-        delayLabel->setToolTip(manualReapplyDelayTooltip(control));
+        delayLabel->setToolTip(manualReapplyDelayTooltip(control, m_controls));
 
         auto *delaySpinBox = new QSpinBox(row);
         delaySpinBox->setRange(-1, 9999);
@@ -1362,7 +1412,7 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
         delaySpinBox->setKeyboardTracking(false);
         delaySpinBox->setMinimumWidth(90);
         delaySpinBox->setAccessibleName(delayLabel->text());
-        delaySpinBox->setToolTip(manualReapplyDelayTooltip(control));
+        delaySpinBox->setToolTip(manualReapplyDelayTooltip(control, m_controls));
         delaySpinBox->setValue(m_manualReapplyDelaysMs.value(control.id, 0));
         widgets.manualReapplyDelayLabel = delayLabel;
         widgets.manualReapplyDelaySpinBox = delaySpinBox;
@@ -1454,7 +1504,7 @@ void V4L2SettingsDialog::updateControlPresentation(quint32 id, const QString &di
 
     const auto &control = m_controls[id];
     auto &widgets = m_controlWidgets[id];
-    const auto tooltip = controlTooltip(control, disabledReason);
+    const auto tooltip = controlTooltip(control, m_controls, disabledReason);
     const auto applyTooltip = [&tooltip](QWidget *widget) {
         if (widget != nullptr)
             widget->setToolTip(tooltip);
@@ -1470,7 +1520,7 @@ void V4L2SettingsDialog::updateControlPresentation(quint32 id, const QString &di
     applyTooltip(widgets.checkBox);
     applyTooltip(widgets.button);
     if (widgets.manualReapplyDelayLabel != nullptr || widgets.manualReapplyDelaySpinBox != nullptr) {
-        const auto delayTooltip = manualReapplyDelayTooltip(control);
+        const auto delayTooltip = manualReapplyDelayTooltip(control, m_controls);
         if (widgets.manualReapplyDelayLabel != nullptr)
             widgets.manualReapplyDelayLabel->setToolTip(delayTooltip);
         if (widgets.manualReapplyDelaySpinBox != nullptr)
