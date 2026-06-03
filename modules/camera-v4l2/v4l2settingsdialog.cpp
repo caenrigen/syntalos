@@ -538,14 +538,14 @@ QString manualModeReapplyNote(const V4L2Camera::ControlInfo &control)
     for (const auto &group : V4L2Camera::autoDependencyGroups()) {
         if (group.autoControlId == control.id) {
             return QStringLiteral(
-                "When this auto control is switched to manual/off, Syntalos can read exposed dependent manual values and "
-                "write the same values back once after the configured delay. This keeps reported and physical camera state "
-                "aligned on cameras whose hardware settles after the driver reports write readiness.");
+                "When this auto control is switched to manual/off, the module reads exposed dependent manual values and "
+                "writes the same values back once after the configured Quirks delay. This keeps reported and physical "
+                "camera state aligned on cameras whose hardware settles after the driver reports write readiness.");
         }
         if (group.manualControlIds.contains(control.id)) {
             return QStringLiteral(
-                "When the related auto control is switched to manual/off, Syntalos can re-apply this reported manual "
-                "value once after that auto control's configured delay.");
+                "When the related auto control is switched to manual/off, the module re-applies this reported manual "
+                "value once after that auto control's configured Quirks delay.");
         }
     }
     return {};
@@ -567,11 +567,12 @@ QString manualReapplyDelayTooltip(
     const QHash<quint32, V4L2Camera::ControlInfo> &controls)
 {
     QStringList lines = {
-        QStringLiteral("Manual sibling write delay for %1.").arg(control.name),
+        QStringLiteral("Manual-after-auto write delay for %1.").arg(control.name),
         QStringLiteral("-1 disables the automatic writes to dependent manual controls."),
         QStringLiteral("0 writes dependent manual controls immediately after switching this auto control to manual/off."),
         QStringLiteral(
-            "Positive values wait that many milliseconds, then read dependent controls and write the freshly reported values."),
+            "Positive values wait that many milliseconds, then read dependent controls and write the freshly reported "
+            "values."),
     };
 
     const auto dependencyLine = autoDependencyTooltipLine(control, controls);
@@ -1183,7 +1184,40 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
 
     for (auto *layout : tabLayouts)
         layout->addStretch();
+    rebuildQuirksTab(sorted);
     updateDependencyStates();
+}
+
+void V4L2SettingsDialog::rebuildQuirksTab(const QList<V4L2Camera::ControlInfo> &controls)
+{
+    const auto dependencyTable = V4L2Camera::autoDependencyTable();
+    QList<V4L2Camera::ControlInfo> quirkControls;
+    for (const auto &control : controls) {
+        if (control.isClassMarker() || control.isDisabled())
+            continue;
+        if (!dependencyTable.contains(control.id) || !unsupportedControlReason(control).isEmpty())
+            continue;
+        if (m_controls.contains(control.id))
+            quirkControls.append(m_controls.value(control.id));
+    }
+
+    if (quirkControls.isEmpty())
+        return;
+
+    auto *scrollArea = new QScrollArea(m_tabs);
+    scrollArea->setWidgetResizable(true);
+    auto *page = new QWidget(scrollArea);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(6);
+
+    for (const auto &control : quirkControls)
+        layout->addWidget(createManualReapplyDelayRow(control));
+    layout->addStretch();
+
+    page->setLayout(layout);
+    scrollArea->setWidget(page);
+    m_tabs->addTab(scrollArea, QStringLiteral("Quirks"));
 }
 
 QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &control)
@@ -1321,37 +1355,6 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
         grid->addWidget(label, 0, 1);
     }
 
-    if (unsupportedReason.isEmpty() && V4L2Camera::autoDependencyTable().contains(control.id)) {
-        auto *delayLabel = new QLabel(QStringLiteral("%1: Manual dependents reapply delay").arg(control.name), row);
-        delayLabel->setToolTip(manualReapplyDelayTooltip(control, m_controls));
-
-        auto *delaySpinBox = new QSpinBox(row);
-        delaySpinBox->setRange(-1, 9999);
-        delaySpinBox->setSuffix(QStringLiteral(" ms"));
-        delaySpinBox->setKeyboardTracking(false);
-        delaySpinBox->setMinimumWidth(90);
-        delaySpinBox->setAccessibleName(delayLabel->text());
-        delaySpinBox->setToolTip(manualReapplyDelayTooltip(control, m_controls));
-        delaySpinBox->setValue(m_manualReapplyDelaysMs.value(control.id, 0));
-        widgets.manualReapplyDelayLabel = delayLabel;
-        widgets.manualReapplyDelaySpinBox = delaySpinBox;
-        auto *delayResetButton = new QPushButton(QStringLiteral("Reset"), row);
-        delayResetButton->setToolTip(QStringLiteral("Reset reapply delay to 0 ms."));
-        widgets.manualReapplyDelayResetButton = delayResetButton;
-        connect(delaySpinBox, qOverload<int>(&QSpinBox::valueChanged), this, [this, id = control.id, delayResetButton](int value) {
-            const auto delayMs = clampManualReapplyDelayMs(value);
-            m_manualReapplyDelaysMs[id] = delayMs;
-            delayResetButton->setEnabled(delayMs != 0);
-            Q_EMIT manualReapplyDelayChanged(id, delayMs);
-        });
-        connect(delayResetButton, &QPushButton::clicked, this, [delaySpinBox]() {
-            delaySpinBox->setValue(0);
-        });
-        grid->addWidget(delayLabel, 1, 0);
-        grid->addWidget(delaySpinBox, 1, 1);
-        grid->addWidget(delayResetButton, 1, 2);
-    }
-
     widgets.resetButton = new QPushButton(QStringLiteral("Reset"), row);
     connect(widgets.resetButton, &QPushButton::clicked, this, [this, id = control.id]() {
         if (m_controls.contains(id))
@@ -1361,6 +1364,50 @@ QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &con
     grid->addWidget(widgets.resetButton, 0, 2);
     m_controlWidgets.insert(control.id, widgets);
     setControlWidgetValue(control.id, control.currentValue);
+    updateControlPresentation(control.id);
+    return row;
+}
+
+QWidget *V4L2SettingsDialog::createManualReapplyDelayRow(const V4L2Camera::ControlInfo &control)
+{
+    auto *row = new QWidget(this);
+    auto *grid = new QGridLayout(row);
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setColumnStretch(1, 1);
+
+    auto *delayLabel = new QLabel(QStringLiteral("%1: Manual-after-auto delay").arg(control.name), row);
+    delayLabel->setToolTip(manualReapplyDelayTooltip(control, m_controls));
+
+    auto *delaySpinBox = new QSpinBox(row);
+    delaySpinBox->setRange(-1, 9999);
+    delaySpinBox->setSuffix(QStringLiteral(" ms"));
+    delaySpinBox->setKeyboardTracking(false);
+    delaySpinBox->setMinimumWidth(90);
+    delaySpinBox->setAccessibleName(QStringLiteral("%1 manual dependents reapply delay").arg(control.name));
+    delaySpinBox->setToolTip(manualReapplyDelayTooltip(control, m_controls));
+    delaySpinBox->setValue(m_manualReapplyDelaysMs.value(control.id, 0));
+
+    auto *delayResetButton = new QPushButton(QStringLiteral("Reset"), row);
+    delayResetButton->setToolTip(QStringLiteral("Reset reapply delay to 0 ms."));
+
+    auto &widgets = m_controlWidgets[control.id];
+    widgets.manualReapplyDelayLabel = delayLabel;
+    widgets.manualReapplyDelaySpinBox = delaySpinBox;
+    widgets.manualReapplyDelayResetButton = delayResetButton;
+
+    connect(delaySpinBox, qOverload<int>(&QSpinBox::valueChanged), this, [this, id = control.id, delayResetButton](int value) {
+        const auto delayMs = clampManualReapplyDelayMs(value);
+        m_manualReapplyDelaysMs[id] = delayMs;
+        delayResetButton->setEnabled(delayMs != 0);
+        Q_EMIT manualReapplyDelayChanged(id, delayMs);
+    });
+    connect(delayResetButton, &QPushButton::clicked, this, [delaySpinBox]() {
+        delaySpinBox->setValue(0);
+    });
+
+    grid->addWidget(delayLabel, 0, 0);
+    grid->addWidget(delaySpinBox, 0, 1);
+    grid->addWidget(delayResetButton, 0, 2);
     updateControlPresentation(control.id);
     return row;
 }

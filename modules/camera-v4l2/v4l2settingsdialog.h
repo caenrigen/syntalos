@@ -97,7 +97,9 @@ private:
     void clearControlTabs();
     void populateModes(const QList<V4L2Camera::CaptureMode> &modes);
     void rebuildControls(const QList<V4L2Camera::ControlInfo> &controls, bool applyLoadedValues = false);
+    void rebuildQuirksTab(const QList<V4L2Camera::ControlInfo> &controls);
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
+    QWidget *createManualReapplyDelayRow(const V4L2Camera::ControlInfo &control);
     void setControlWidgetValue(quint32 id, qint64 value);
     void handleControlEdited(quint32 id, qint64 value);
     void updateControlPresentation(quint32 id, const QString &disabledReason = QString());
