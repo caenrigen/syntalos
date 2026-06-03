@@ -35,6 +35,7 @@ public:
     QList<V4L2Camera::ControlInfo> controls() const;
     QHash<quint32, qint64> desiredControlValues() const;
     QHash<quint32, int> manualReapplyDelaysMs() const;
+    bool forceFocusAutoCycleOnRestore() const;
 
     void setRunning(bool running);
     void setEffectiveMode(const V4L2Camera::CaptureMode &mode);
@@ -80,10 +81,12 @@ private:
     QLabel *m_summaryLabel;
     QLabel *m_effectiveLabel;
     QPushButton *m_refreshButton;
+    QCheckBox *m_forceFocusAutoCycleCheckBox;
 
     bool m_running;
     bool m_blockUiSignals;
     bool m_applyLoadedControlValues;
+    bool m_forceFocusAutoCycleOnRestore;
     V4L2Camera::DeviceIdentity m_loadedIdentity;
     V4L2Camera::DeviceIdentity m_pendingIdentity;
     V4L2Camera::CaptureMode m_loadedMode;
@@ -98,6 +101,7 @@ private:
     void populateModes(const QList<V4L2Camera::CaptureMode> &modes);
     void rebuildControls(const QList<V4L2Camera::ControlInfo> &controls, bool applyLoadedValues = false);
     void rebuildQuirksTab(const QList<V4L2Camera::ControlInfo> &controls);
+    QWidget *createFocusAutoCycleRow();
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
     QWidget *createManualReapplyDelayRow(const V4L2Camera::ControlInfo &control);
     void setControlWidgetValue(quint32 id, qint64 value);

@@ -582,6 +582,15 @@ QString manualReapplyDelayTooltip(
     return wrappedTooltip(lines);
 }
 
+QString focusAutoCycleTooltip()
+{
+    return wrappedTooltip({
+        QStringLiteral("During prepare-time restore, if the saved Focus Auto value is off, write Focus Auto on, wait 100 ms, then restore the saved off value."),
+        QStringLiteral("This can recover cameras whose driver reports manual focus mode after reconnect or reboot while the hardware still behaves as if autofocus is active."),
+        QStringLiteral("This setting affects startup restore only; it is not used for live control changes while acquisition is running."),
+    });
+}
+
 QString controlTooltip(
     const V4L2Camera::ControlInfo &control,
     const QHash<quint32, V4L2Camera::ControlInfo> &controls,
@@ -775,9 +784,11 @@ V4L2SettingsDialog::V4L2SettingsDialog(QWidget *parent)
       m_summaryLabel(nullptr),
       m_effectiveLabel(nullptr),
       m_refreshButton(nullptr),
+      m_forceFocusAutoCycleCheckBox(nullptr),
       m_running(false),
       m_blockUiSignals(false),
-      m_applyLoadedControlValues(false)
+      m_applyLoadedControlValues(false),
+      m_forceFocusAutoCycleOnRestore(false)
 {
     qRegisterMetaType<V4L2Camera::DeviceIdentity>();
     qRegisterMetaType<V4L2Camera::CaptureMode>();
@@ -814,6 +825,11 @@ QHash<quint32, qint64> V4L2SettingsDialog::desiredControlValues() const
 QHash<quint32, int> V4L2SettingsDialog::manualReapplyDelaysMs() const
 {
     return m_manualReapplyDelaysMs;
+}
+
+bool V4L2SettingsDialog::forceFocusAutoCycleOnRestore() const
+{
+    return m_forceFocusAutoCycleOnRestore;
 }
 
 void V4L2SettingsDialog::setRunning(bool running)
@@ -975,6 +991,7 @@ void V4L2SettingsDialog::serializeSettings(QVariantHash &settings) const
     settings.insert(QStringLiteral("capture_mode"), mode.toVariant());
     settings.insert(QStringLiteral("control_values"), serializableControlSettings());
     settings.insert(QStringLiteral("manual_reapply_delays_ms"), serializableManualReapplyDelaySettings());
+    settings.insert(QStringLiteral("force_focus_auto_cycle_on_restore"), m_forceFocusAutoCycleOnRestore);
 }
 
 void V4L2SettingsDialog::loadSettings(const QVariantHash &settings)
@@ -984,6 +1001,10 @@ void V4L2SettingsDialog::loadSettings(const QVariantHash &settings)
     m_loadedMode = V4L2Camera::CaptureMode::fromVariant(settings.value(QStringLiteral("capture_mode")).toHash());
     m_loadedControlValues.clear();
     m_manualReapplyDelaysMs.clear();
+    m_forceFocusAutoCycleOnRestore =
+        settings.value(QStringLiteral("force_focus_auto_cycle_on_restore"), false).toBool();
+    if (m_forceFocusAutoCycleCheckBox != nullptr)
+        m_forceFocusAutoCycleCheckBox->setChecked(m_forceFocusAutoCycleOnRestore);
 
     const auto controlValues = settings.value(QStringLiteral("control_values")).toList();
     for (const auto &entryVar : controlValues) {
@@ -1095,6 +1116,7 @@ void V4L2SettingsDialog::buildUi()
 void V4L2SettingsDialog::clearControlTabs()
 {
     m_controlWidgets.clear();
+    m_forceFocusAutoCycleCheckBox = nullptr;
     while (m_tabs->count() > 1) {
         auto *widget = m_tabs->widget(1);
         m_tabs->removeTab(1);
@@ -1192,16 +1214,19 @@ void V4L2SettingsDialog::rebuildQuirksTab(const QList<V4L2Camera::ControlInfo> &
 {
     const auto dependencyTable = V4L2Camera::autoDependencyTable();
     QList<V4L2Camera::ControlInfo> quirkControls;
+    bool hasFocusAutoControl = false;
     for (const auto &control : controls) {
         if (control.isClassMarker() || control.isDisabled())
             continue;
+        if (control.id == V4L2_CID_FOCUS_AUTO && m_controls.contains(control.id))
+            hasFocusAutoControl = true;
         if (!dependencyTable.contains(control.id) || !unsupportedControlReason(control).isEmpty())
             continue;
         if (m_controls.contains(control.id))
             quirkControls.append(m_controls.value(control.id));
     }
 
-    if (quirkControls.isEmpty())
+    if (quirkControls.isEmpty() && !hasFocusAutoControl)
         return;
 
     auto *scrollArea = new QScrollArea(m_tabs);
@@ -1211,6 +1236,9 @@ void V4L2SettingsDialog::rebuildQuirksTab(const QList<V4L2Camera::ControlInfo> &
     layout->setContentsMargins(10, 10, 10, 10);
     layout->setSpacing(6);
 
+    if (hasFocusAutoControl)
+        layout->addWidget(createFocusAutoCycleRow());
+
     for (const auto &control : quirkControls)
         layout->addWidget(createManualReapplyDelayRow(control));
     layout->addStretch();
@@ -1218,6 +1246,40 @@ void V4L2SettingsDialog::rebuildQuirksTab(const QList<V4L2Camera::ControlInfo> &
     page->setLayout(layout);
     scrollArea->setWidget(page);
     m_tabs->addTab(scrollArea, QStringLiteral("Quirks"));
+}
+
+QWidget *V4L2SettingsDialog::createFocusAutoCycleRow()
+{
+    auto *row = new QWidget(this);
+    auto *grid = new QGridLayout(row);
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setColumnStretch(1, 1);
+
+    auto *label = new QLabel(QStringLiteral("Focus Auto restore cycle"), row);
+    label->setToolTip(focusAutoCycleTooltip());
+
+    auto *checkBox = new QCheckBox(row);
+    checkBox->setChecked(m_forceFocusAutoCycleOnRestore);
+    checkBox->setToolTip(focusAutoCycleTooltip());
+    checkBox->setAccessibleName(QStringLiteral("Cycle Focus Auto before restoring manual focus mode"));
+    m_forceFocusAutoCycleCheckBox = checkBox;
+
+    auto *resetButton = new QPushButton(QStringLiteral("Reset"), row);
+    resetButton->setToolTip(QStringLiteral("Reset Focus Auto restore cycle to disabled."));
+    resetButton->setEnabled(m_forceFocusAutoCycleOnRestore);
+
+    connect(checkBox, &QCheckBox::toggled, this, [this, resetButton](bool checked) {
+        m_forceFocusAutoCycleOnRestore = checked;
+        resetButton->setEnabled(checked);
+    });
+    connect(resetButton, &QPushButton::clicked, this, [checkBox]() {
+        checkBox->setChecked(false);
+    });
+
+    grid->addWidget(label, 0, 0);
+    grid->addWidget(checkBox, 0, 1);
+    grid->addWidget(resetButton, 0, 2);
+    return row;
 }
 
 QWidget *V4L2SettingsDialog::createControlRow(const V4L2Camera::ControlInfo &control)

@@ -256,6 +256,7 @@ private:
     QHash<quint32, int> m_manualReapplyDelaysMs;
     QList<quint32> m_pendingButtonControls;
     QList<ScheduledManualReapply> m_scheduledManualReapplies;
+    bool m_forceFocusAutoCycleOnRestore;
 
 public:
     explicit V4L2CameraModule(QObject *parent = nullptr)
@@ -266,7 +267,8 @@ public:
           m_controlEventFd(-1),
           m_warnedReadbackMismatch(false),
           m_warnedTimestampFallback(false),
-          m_warnedExposurePriority(false)
+          m_warnedExposurePriority(false),
+          m_forceFocusAutoCycleOnRestore(false)
     {
         m_outStream = registerOutputPort<Frame>(QStringLiteral("video"), QStringLiteral("Video"));
         addSettingsWindow(m_settingsDialog);
@@ -361,6 +363,7 @@ public:
             QMutexLocker locker(&m_controlMutex);
             m_desiredControlValues = m_settingsDialog->desiredControlValues();
             m_manualReapplyDelaysMs = m_settingsDialog->manualReapplyDelaysMs();
+            m_forceFocusAutoCycleOnRestore = m_settingsDialog->forceFocusAutoCycleOnRestore();
         }
 
         auto preparedDevice = std::make_unique<V4L2Camera::Device>();
@@ -774,10 +777,12 @@ private:
     {
         QHash<quint32, qint64> desired;
         QHash<quint32, int> manualReapplyDelaysMs;
+        bool forceFocusAutoCycleOnRestore = false;
         {
             QMutexLocker locker(&m_controlMutex);
             desired = m_desiredControlValues;
             manualReapplyDelaysMs = m_manualReapplyDelaysMs;
+            forceFocusAutoCycleOnRestore = m_forceFocusAutoCycleOnRestore;
         }
 
         if (desired.contains(V4L2_CID_EXPOSURE_AUTO_PRIORITY) && desired.value(V4L2_CID_EXPOSURE_AUTO_PRIORITY) != 0) {
@@ -810,6 +815,19 @@ private:
                 continue;
 
             const auto requestedValue = desired.value(control.id);
+            if (forceFocusAutoCycleOnRestore && control.id == V4L2_CID_FOCUS_AUTO
+                && !V4L2Camera::autoControlEnabled(control.id, requestedValue)) {
+                const auto enableResult = device.setControlValue(control, 1);
+                if (!enableResult.success) {
+                    logWarning(
+                        m_log,
+                        QStringLiteral("Failed to cycle Focus Auto before restoring manual focus mode: %1")
+                            .arg(enableResult.error));
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+
             const auto result = device.setControlValue(control, requestedValue);
             if (!result.success) {
                 logWarning(m_log, result.error);
