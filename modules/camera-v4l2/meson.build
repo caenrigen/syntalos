@@ -25,7 +25,9 @@ module_deps = [
     swscale_dep,
 ]
 
-module_data = []
+module_data = [
+    'camera-v4l2.svg',
+]
 
 #
 # Generic module setup
