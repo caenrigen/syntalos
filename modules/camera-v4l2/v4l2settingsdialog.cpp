@@ -1080,10 +1080,11 @@ void V4L2SettingsDialog::buildUi()
 
     m_captureTab = new QWidget(this);
     auto *captureLayout = new QVBoxLayout(m_captureTab);
-    auto *captureGroup = new QGroupBox(QStringLiteral("Capture"), m_captureTab);
-    auto *form = new QFormLayout(captureGroup);
+    captureLayout->setContentsMargins(10, 10, 10, 10);
+    captureLayout->setSpacing(6);
+    auto *form = new QFormLayout;
 
-    auto *deviceRow = new QWidget(captureGroup);
+    auto *deviceRow = new QWidget(m_captureTab);
     auto *deviceLayout = new QHBoxLayout(deviceRow);
     deviceLayout->setContentsMargins(0, 0, 0, 0);
     m_deviceCombo = new QComboBox(deviceRow);
@@ -1092,19 +1093,19 @@ void V4L2SettingsDialog::buildUi()
     deviceLayout->addWidget(m_refreshButton);
     form->addRow(QStringLiteral("Device"), deviceRow);
 
-    m_modeCombo = new QComboBox(captureGroup);
+    m_modeCombo = new QComboBox(m_captureTab);
     form->addRow(QStringLiteral("Mode"), m_modeCombo);
 
-    m_effectiveLabel = new QLabel(QStringLiteral("Not configured"), captureGroup);
+    m_effectiveLabel = new QLabel(QStringLiteral("Not configured"), m_captureTab);
     m_effectiveLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow(QStringLiteral("Effective"), m_effectiveLabel);
 
-    m_summaryLabel = new QLabel(captureGroup);
+    m_summaryLabel = new QLabel(m_captureTab);
     m_summaryLabel->setWordWrap(true);
     m_summaryLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow(QStringLiteral("Identity"), m_summaryLabel);
 
-    captureLayout->addWidget(captureGroup);
+    captureLayout->addLayout(form);
     captureLayout->addStretch();
     m_tabs->addTab(m_captureTab, QStringLiteral("Capture"));
 
