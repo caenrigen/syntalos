@@ -1215,6 +1215,13 @@ ControlWriteResult Device::setControlValue(const ControlInfo &control, qint64 va
         return result;
     }
 
+    if (!control.canRead()) {
+        result.readbackValue = result.requestedValue;
+        result.changedByDevice = false;
+        result.success = true;
+        return result;
+    }
+
     ControlInfo readbackControl = control;
     QString readError;
     if (!readControlValue(&readbackControl, &readError)) {
