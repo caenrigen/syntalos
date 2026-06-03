@@ -1249,12 +1249,14 @@ QString V4L2CameraModuleInfo::name() const
 
 QString V4L2CameraModuleInfo::summary() const
 {
-    return QStringLiteral("Capture frames from V4L2 cameras using native streaming I/O.");
+    return QStringLiteral("Capture GREY, YUYV, and MJPEG frames from V4L2 cameras.");
 }
 
 QString V4L2CameraModuleInfo::description() const
 {
-    return QStringLiteral("Capture GREY, YUYV, and MJPEG frames from Linux V4L2 devices with native mmap buffers and V4L2 controls.");
+    return QStringLiteral(
+        "Capture from Linux V4L2 devices using native mmap streaming. This module currently supports GREY, YUYV, "
+        "and MJPEG pixel formats and exposes standard V4L2 controls.");
 }
 
 QString V4L2CameraModuleInfo::authors() const
