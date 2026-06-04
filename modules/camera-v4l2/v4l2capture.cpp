@@ -10,34 +10,17 @@
 #include "streams/stream.h"
 
 #include <algorithm>
-#include <cerrno>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <sys/eventfd.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <utility>
 #include <unistd.h>
 
 namespace V4L2Camera
 {
-
-int xioctl(int fd, unsigned long request, void *arg)
-{
-    int ret;
-    do {
-        ret = ioctl(fd, request, arg);
-    } while (ret == -1 && errno == EINTR);
-    return ret;
-}
-
-QString errnoString()
-{
-    return QString::fromLocal8Bit(std::strerror(errno));
-}
 
 void signalEventFd(int fd)
 {
@@ -148,16 +131,6 @@ int EventFd::fd() const
     return m_fd;
 }
 
-bool EventFd::isOpen() const
-{
-    return m_fd >= 0;
-}
-
-void EventFd::signal() const
-{
-    signalEventFd(m_fd);
-}
-
 void EventFd::drain() const
 {
     drainEventFd(m_fd);
@@ -233,6 +206,28 @@ bool MMapBufferPool::request(int fd, const CaptureMode &mode, QString *error)
     return true;
 }
 
+bool MMapBufferPool::queueAll(QString *error) const
+{
+    if (m_fd < 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("No V4L2 mmap buffers have been requested.");
+        return false;
+    }
+
+    for (quint32 i = 0; i < m_buffers.size(); ++i) {
+        v4l2_buffer buf = {};
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        if (xioctl(m_fd, VIDIOC_QBUF, &buf) < 0) {
+            if (error != nullptr)
+                *error = QStringLiteral("VIDIOC_QBUF failed for buffer %1: %2").arg(i).arg(errnoString());
+            return false;
+        }
+    }
+    return true;
+}
+
 void MMapBufferPool::release()
 {
     for (auto &buffer : m_buffers) {
@@ -291,27 +286,6 @@ void CaptureStreamGuard::stop()
     }
     m_streaming = false;
     m_fd = -1;
-}
-
-bool CaptureStreamGuard::isStreaming() const
-{
-    return m_streaming;
-}
-
-bool queueAllBuffers(int fd, size_t count, QString *error)
-{
-    for (quint32 i = 0; i < count; ++i) {
-        v4l2_buffer buf = {};
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-        if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-            if (error != nullptr)
-                *error = QStringLiteral("VIDIOC_QBUF failed for buffer %1: %2").arg(i).arg(errnoString());
-            return false;
-        }
-    }
-    return true;
 }
 
 void setFrameStreamMetadata(VariantDataStream *stream, const CaptureMode &mode)

@@ -7,6 +7,7 @@
 #include "v4l2cameramodule.h"
 
 #include "datactl/frametype.h"
+#include "syscopeguard.h"
 #include "utils/misc.h"
 #include "v4l2capture.h"
 #include "v4l2controlapplier.h"
@@ -289,7 +290,7 @@ public:
             device = std::move(m_preparedDevice);
         }
 
-        auto cleanup = [&]() {
+        auto cleanup = syScopeGuard([&]() {
             m_stopEventFd = -1;
             m_controlEventFd = -1;
             streamGuard.stop();
@@ -297,16 +298,14 @@ public:
             device.reset();
             QMetaObject::invokeMethod(m_settingsDialog, [this]() { m_settingsDialog->setRunning(false); }, Qt::QueuedConnection);
             m_stopped = true;
-        };
+        });
 
         if (!stopEvent.open(&error)) {
             raiseError(QStringLiteral("Unable to create V4L2 stop eventfd: %1").arg(error));
-            cleanup();
             return;
         }
         if (!controlEvent.open(&error)) {
             raiseError(QStringLiteral("Unable to create V4L2 control eventfd: %1").arg(error));
-            cleanup();
             return;
         }
         m_stopEventFd = stopEvent.fd();
@@ -314,34 +313,28 @@ public:
 
         if (device == nullptr || !device->isOpen()) {
             raiseError(QStringLiteral("No prepared V4L2 camera device is available for capture."));
-            cleanup();
             return;
         }
 
         V4L2Camera::FrameDecoder decoder;
         if (!decoder.configure(m_effectiveMode, &error)) {
             raiseError(error);
-            cleanup();
             return;
         }
 
-        if (!buffers.request(device->fd(), m_effectiveMode, &error)
-            || !V4L2Camera::queueAllBuffers(device->fd(), buffers.size(), &error)) {
+        if (!buffers.request(device->fd(), m_effectiveMode, &error) || !buffers.queueAll(&error)) {
             raiseError(error);
-            cleanup();
             return;
         }
 
         statusMessage(QStringLiteral("%1").arg(m_device.displayName()));
         waitCondition->wait(this);
         if (!m_running) {
-            cleanup();
             return;
         }
 
         if (!syntalosClockCanUseV4L2Monotonic(&error)) {
             raiseError(error);
-            cleanup();
             return;
         }
 
@@ -349,13 +342,11 @@ public:
         nanoseconds_t clockMonotonicAfterNs;
         if (!currentClockMonotonicNsec(&clockMonotonicBeforeNs, &error)) {
             raiseError(error);
-            cleanup();
             return;
         }
         const auto runSampleNs = m_syTimer->timeSinceStartNsec();
         if (!currentClockMonotonicNsec(&clockMonotonicAfterNs, &error)) {
             raiseError(error);
-            cleanup();
             return;
         }
         const auto clockMonotonicAtRunSampleNs =
@@ -364,7 +355,6 @@ public:
 
         if (!streamGuard.start(device->fd(), &error)) {
             raiseError(error);
-            cleanup();
             return;
         }
 
@@ -554,8 +544,6 @@ public:
                 lastStatusTime = now;
             }
         }
-
-        cleanup();
     }
 
     void stop() override

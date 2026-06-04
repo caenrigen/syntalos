@@ -32,7 +32,6 @@ public:
 
     V4L2Camera::DeviceIdentity selectedDevice() const;
     V4L2Camera::CaptureMode selectedMode() const;
-    QList<V4L2Camera::ControlInfo> controls() const;
     QHash<quint32, qint64> desiredControlValues() const;
     QHash<quint32, int> manualReapplyDelaysMs() const;
     bool forceFocusAutoCycleOnRestore() const;

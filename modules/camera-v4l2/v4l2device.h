@@ -142,6 +142,8 @@ struct AutoDependencyGroup {
 
 QString fourccToString(quint32 fourcc);
 quint32 fourccFromString(const QString &text);
+int xioctl(int fd, unsigned long request, void *arg);
+QString errnoString();
 bool isSupportedFourcc(quint32 fourcc);
 int cvTypeForFourcc(quint32 fourcc);
 QString controlClassName(quint32 controlClass);

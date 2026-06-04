@@ -36,12 +36,6 @@ static ControlApplyWarning exposureAutoPriorityWarning()
     };
 }
 
-void ControlApplier::clear()
-{
-    m_controlMap.clear();
-    m_scheduledManualReapplies.clear();
-}
-
 void ControlApplier::clearScheduledManualReapplies()
 {
     m_scheduledManualReapplies.clear();
@@ -50,11 +44,6 @@ void ControlApplier::clearScheduledManualReapplies()
 void ControlApplier::updateControlMap(const QList<ControlInfo> &controls)
 {
     m_controlMap = controlsById(controls);
-}
-
-const QHash<quint32, ControlInfo> &ControlApplier::controlMap() const
-{
-    return m_controlMap;
 }
 
 int ControlApplier::controlPollTimeoutMs() const
@@ -140,10 +129,10 @@ ControlApplyReport ControlApplier::applyDesiredControls(
                     device,
                     control,
                     dependencyTable,
-                    &desired,
+                    desired,
                     nullptr,
                     ManualDependentReapplySource::DesiredValue,
-                    &report);
+                    report);
             } else if (delayMs > 0) {
                 // During prepare/startup no frames are being dequeued yet, so waiting here honors saved
                 // startup control state without stalling live acquisition.
@@ -152,10 +141,10 @@ ControlApplyReport ControlApplier::applyDesiredControls(
                     device,
                     control,
                     dependencyTable,
-                    &desired,
+                    desired,
                     nullptr,
                     ManualDependentReapplySource::DesiredValue,
-                    &report);
+                    report);
             }
         }
     }
@@ -184,10 +173,10 @@ void ControlApplier::reapplyManualDependentControls(
     Device &device,
     const ControlInfo &autoControl,
     const QHash<quint32, QList<quint32>> &dependencyTable,
-    QHash<quint32, qint64> *desired,
+    QHash<quint32, qint64> &desired,
     QSet<quint32> *affectedRefreshIds,
     ManualDependentReapplySource valueSource,
-    ControlApplyReport *report)
+    ControlApplyReport &report)
 {
     const auto dependentIds = dependencyTable.value(autoControl.id);
     if (dependentIds.isEmpty())
@@ -201,18 +190,14 @@ void ControlApplier::reapplyManualDependentControls(
     if (controls.isEmpty())
         return;
     updateControlMap(controls);
-    const auto queriedControls = controlsById(controls);
 
     for (const auto dependentId : dependentIds) {
-        if (!m_controlMap.contains(dependentId))
+        const auto dependentIt = m_controlMap.constFind(dependentId);
+        if (dependentIt == m_controlMap.constEnd())
             continue;
 
         if (affectedRefreshIds != nullptr)
             affectedRefreshIds->insert(dependentId);
-
-        const auto dependentIt = queriedControls.constFind(dependentId);
-        if (dependentIt == queriedControls.constEnd())
-            continue;
 
         const auto dependent = dependentIt.value();
         if (!dependent.canRead() || !dependent.canWrite())
@@ -222,18 +207,16 @@ void ControlApplier::reapplyManualDependentControls(
         // but keeps using a different physical state until a manual value is written.
         // During startup restore, keep saved desired values authoritative instead
         // of replacing them with the driver's transient post-auto readback.
-        const bool useDesiredValue = valueSource == ManualDependentReapplySource::DesiredValue && desired != nullptr
-            && desired->contains(dependent.id);
-        const auto writeValue = useDesiredValue ? desired->value(dependent.id) : dependent.currentValue;
+        const bool useDesiredValue =
+            valueSource == ManualDependentReapplySource::DesiredValue && desired.contains(dependent.id);
+        const auto writeValue = useDesiredValue ? desired.value(dependent.id) : dependent.currentValue;
         const auto result = device.setControlValue(dependent, writeValue);
         if (!result.success) {
-            if (report != nullptr)
-                report->logWarnings.append(result.error);
+            report.logWarnings.append(result.error);
             continue;
         }
 
-        if (desired != nullptr)
-            (*desired)[dependent.id] = result.readbackValue;
+        desired[dependent.id] = result.readbackValue;
         if (m_controlMap.contains(dependent.id))
             m_controlMap[dependent.id].currentValue = result.readbackValue;
     }
@@ -243,9 +226,9 @@ void ControlApplier::applyDueManualReapplies(
     Device &device,
     const QHash<quint32, QList<quint32>> &dependencyTable,
     const QHash<quint32, int> &manualReapplyDelaysMs,
-    QHash<quint32, qint64> *desired,
+    QHash<quint32, qint64> &desired,
     QSet<quint32> *affectedRefreshIds,
-    ControlApplyReport *report)
+    ControlApplyReport &report)
 {
     if (m_scheduledManualReapplies.isEmpty())
         return;
@@ -268,7 +251,7 @@ void ControlApplier::applyDueManualReapplies(
             continue;
 
         const auto autoControl = m_controlMap.value(pending.autoControlId);
-        if (autoControlEnabled(autoControl.id, desired->value(autoControl.id, autoControl.currentValue)))
+        if (autoControlEnabled(autoControl.id, desired.value(autoControl.id, autoControl.currentValue)))
             continue;
 
         reapplyManualDependentControls(
@@ -331,10 +314,10 @@ ControlApplyReport ControlApplier::applyPendingControlWrites(Device &device, con
                         device,
                         control,
                         dependencyTable,
-                        &desired,
+                        desired,
                         &affectedRefreshIds,
                         ManualDependentReapplySource::ReportedValue,
-                        &report);
+                        report);
                 else if (delayMs > 0)
                     scheduleManualDependentReapply(control.id, delayMs);
             }
@@ -351,7 +334,7 @@ ControlApplyReport ControlApplier::applyPendingControlWrites(Device &device, con
             report.logWarnings.append(error);
     }
 
-    applyDueManualReapplies(device, dependencyTable, request.manualReapplyDelaysMs, &desired, &affectedRefreshIds, &report);
+    applyDueManualReapplies(device, dependencyTable, request.manualReapplyDelaysMs, desired, &affectedRefreshIds, report);
 
     if (!affectedRefreshIds.isEmpty()) {
         auto controls = device.queryControls(nullptr);

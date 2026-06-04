@@ -14,7 +14,6 @@
 #include <QDebug>
 #include <QFormLayout>
 #include <QGridLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -719,15 +718,6 @@ V4L2Camera::DeviceIdentity V4L2SettingsDialog::selectedDevice() const
 V4L2Camera::CaptureMode V4L2SettingsDialog::selectedMode() const
 {
     return m_modeCombo->currentData().value<V4L2Camera::CaptureMode>();
-}
-
-QList<V4L2Camera::ControlInfo> V4L2SettingsDialog::controls() const
-{
-    QList<V4L2Camera::ControlInfo> result;
-    result.reserve(m_controls.size());
-    for (const auto &control : m_controls)
-        result.append(control);
-    return result;
 }
 
 QHash<quint32, qint64> V4L2SettingsDialog::desiredControlValues() const

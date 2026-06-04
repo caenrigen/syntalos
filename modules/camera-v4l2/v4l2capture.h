@@ -23,8 +23,6 @@ struct MMapBuffer {
     size_t length = 0;
 };
 
-int xioctl(int fd, unsigned long request, void *arg);
-QString errnoString();
 void signalEventFd(int fd);
 void drainEventFd(int fd);
 
@@ -42,8 +40,6 @@ public:
     bool open(QString *error);
     void close();
     int fd() const;
-    bool isOpen() const;
-    void signal() const;
     void drain() const;
 
 private:
@@ -62,6 +58,7 @@ public:
     MMapBufferPool &operator=(MMapBufferPool &&other) noexcept;
 
     bool request(int fd, const CaptureMode &mode, QString *error);
+    bool queueAll(QString *error) const;
     void release();
     size_t size() const;
     const MMapBuffer &operator[](size_t index) const;
@@ -82,14 +79,12 @@ public:
 
     bool start(int fd, QString *error);
     void stop();
-    bool isStreaming() const;
 
 private:
     int m_fd = -1;
     bool m_streaming = false;
 };
 
-bool queueAllBuffers(int fd, size_t count, QString *error);
 void setFrameStreamMetadata(VariantDataStream *stream, const CaptureMode &mode);
 
 } // namespace V4L2Camera

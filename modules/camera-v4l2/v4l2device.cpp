@@ -37,10 +37,8 @@ extern "C" {
 #define V4L2_CTRL_FLAG_NEXT_COMPOUND 0x40000000
 #endif
 
-namespace
+namespace V4L2Camera
 {
-
-using FrameInterval = QPair<quint32, quint32>;
 
 int xioctl(int fd, unsigned long request, void *arg)
 {
@@ -55,6 +53,14 @@ QString errnoString()
 {
     return QString::fromLocal8Bit(std::strerror(errno));
 }
+
+} // namespace V4L2Camera
+
+namespace
+{
+
+using FrameInterval = QPair<quint32, quint32>;
+using V4L2Camera::xioctl;
 
 QString avErrorString(int errnum)
 {

@@ -61,10 +61,8 @@ struct PendingControlRequest {
 class ControlApplier
 {
 public:
-    void clear();
     void clearScheduledManualReapplies();
     void updateControlMap(const QList<ControlInfo> &controls);
-    const QHash<quint32, ControlInfo> &controlMap() const;
 
     int controlPollTimeoutMs() const;
     ControlApplyReport applyDesiredControls(
@@ -93,17 +91,17 @@ private:
         Device &device,
         const ControlInfo &autoControl,
         const QHash<quint32, QList<quint32>> &dependencyTable,
-        QHash<quint32, qint64> *desired,
+        QHash<quint32, qint64> &desired,
         QSet<quint32> *affectedRefreshIds,
         ManualDependentReapplySource valueSource,
-        ControlApplyReport *report);
+        ControlApplyReport &report);
     void applyDueManualReapplies(
         Device &device,
         const QHash<quint32, QList<quint32>> &dependencyTable,
         const QHash<quint32, int> &manualReapplyDelaysMs,
-        QHash<quint32, qint64> *desired,
+        QHash<quint32, qint64> &desired,
         QSet<quint32> *affectedRefreshIds,
-        ControlApplyReport *report);
+        ControlApplyReport &report);
 };
 
 } // namespace V4L2Camera
