@@ -24,6 +24,7 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <limits>
 #include <linux/videodev2.h>
 #include <memory>
 #include <optional>
@@ -468,6 +469,7 @@ public:
         m_outStream->setMetadataValue("v4l2_timestamp_type", std::string("monotonic_required"));
         m_outStream->setMetadataValue("v4l2_timestamp_source", std::string("soe_or_eof"));
         m_outStream->setMetadataValue("v4l2_timestamp_sources_accepted", std::string("soe,eof"));
+        m_outStream->setMetadataValue("frame_index_source", std::string("v4l2_buffer_sequence"));
         m_outStream->start();
 
         statusMessage(QStringLiteral("Waiting."));
@@ -586,6 +588,7 @@ public:
         uint64_t invalidFrameCount = 0;
         uint64_t droppedFrameCount = 0;
         uint64_t sequenceGapCount = 0;
+        uint64_t sequenceWrapOffset = 0;
         std::optional<quint32> lastSequence;
         std::optional<nanoseconds_t> lastDriverTimestamp;
         std::optional<microseconds_t> lastFrameTime;
@@ -686,6 +689,12 @@ public:
                 }
 
                 if (m_running) {
+                    if (lastSequence.has_value() && buf.sequence < *lastSequence
+                        && (*lastSequence - buf.sequence) > (std::numeric_limits<quint32>::max() / 2)) {
+                        sequenceWrapOffset += uint64_t{1} << 32;
+                    }
+                    const uint64_t frameIndex = sequenceWrapOffset + buf.sequence;
+
                     if (lastSequence.has_value()) {
                         const quint32 expected = *lastSequence + 1;
                         if (buf.sequence != expected) {
@@ -727,7 +736,8 @@ public:
                                 frameTime = *lastFrameTime + microseconds_t(1);
                             lastFrameTime = frameTime;
 
-                            m_outStream->push(Frame(image, frameCount++, frameTime));
+                            m_outStream->push(Frame(image, frameIndex, frameTime));
+                            frameCount++;
                             invalidFrameCount = 0;
                         }
                     }
