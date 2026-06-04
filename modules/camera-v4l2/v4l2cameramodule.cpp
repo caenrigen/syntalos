@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <memory>
@@ -201,6 +202,68 @@ nanoseconds_t v4l2TimestampToNsec(const timeval &timestamp)
                          + static_cast<int64_t>(timestamp.tv_usec) * 1000LL);
 }
 
+bool currentClockMonotonicNsec(nanoseconds_t *timestamp, QString *error)
+{
+    timespec ts = {};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        if (error != nullptr)
+            *error = QStringLiteral("clock_gettime(CLOCK_MONOTONIC) failed: %1").arg(errnoString());
+        return false;
+    }
+
+    *timestamp = nanoseconds_t(static_cast<int64_t>(ts.tv_sec) * 1000LL * 1000LL * 1000LL
+                               + static_cast<int64_t>(ts.tv_nsec));
+    return true;
+}
+
+bool syntalosClockCanUseV4L2Monotonic(QString *error)
+{
+#ifdef SYNTALOS_USE_RAW_MONOTONIC_TIME
+    if (error != nullptr) {
+        *error = QStringLiteral(
+            "camera-v4l2 requires Syntalos master time to use CLOCK_MONOTONIC because V4L2 "
+            "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC timestamps are CLOCK_MONOTONIC. This build uses "
+            "CLOCK_MONOTONIC_RAW, so a static timestamp offset would drift during long acquisitions.");
+    }
+    return false;
+#else
+    (void)error;
+    return true;
+#endif
+}
+
+QString timestampTypeName(quint32 flags)
+{
+    switch (flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) {
+    case V4L2_BUF_FLAG_TIMESTAMP_UNKNOWN:
+        return QStringLiteral("unknown");
+    case V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC:
+        return QStringLiteral("monotonic");
+    case V4L2_BUF_FLAG_TIMESTAMP_COPY:
+        return QStringLiteral("copy");
+    default:
+        return QStringLiteral("unrecognized");
+    }
+}
+
+QString timestampSourceName(quint32 flags)
+{
+    switch (flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK) {
+    case V4L2_BUF_FLAG_TSTAMP_SRC_EOF:
+        return QStringLiteral("eof");
+    case V4L2_BUF_FLAG_TSTAMP_SRC_SOE:
+        return QStringLiteral("soe");
+    default:
+        return QStringLiteral("unrecognized");
+    }
+}
+
+bool acceptedTimestampSource(quint32 flags)
+{
+    const auto source = flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK;
+    return source == V4L2_BUF_FLAG_TSTAMP_SRC_EOF || source == V4L2_BUF_FLAG_TSTAMP_SRC_SOE;
+}
+
 void logWarning(QuillLogger *log, const QString &message)
 {
     LOG_WARNING(log, "{}", message.toStdString());
@@ -240,7 +303,6 @@ private:
     std::atomic_int m_stopEventFd;
     std::atomic_int m_controlEventFd;
     std::atomic_bool m_warnedReadbackMismatch;
-    std::atomic_bool m_warnedTimestampFallback;
     std::atomic_bool m_warnedExposurePriority;
 
     V4L2Camera::DeviceIdentity m_device;
@@ -266,7 +328,6 @@ public:
           m_stopEventFd(-1),
           m_controlEventFd(-1),
           m_warnedReadbackMismatch(false),
-          m_warnedTimestampFallback(false),
           m_warnedExposurePriority(false),
           m_forceFocusAutoCycleOnRestore(false)
     {
@@ -319,7 +380,6 @@ public:
     bool prepare(const TestSubject &) override
     {
         m_warnedReadbackMismatch = false;
-        m_warnedTimestampFallback = false;
         m_warnedExposurePriority = false;
         {
             QMutexLocker locker(&m_deviceMutex);
@@ -401,6 +461,13 @@ public:
         m_outStream->setMetadataValue("colorspace", static_cast<int64_t>(m_effectiveMode.colorspace));
         m_outStream->setMetadataValue("field", static_cast<int64_t>(m_effectiveMode.field));
         m_outStream->setMetadataValue("bayer_pattern", std::string("none"));
+        m_outStream->setMetadataValue("timestamp_basis", std::string("v4l2_buffer_timestamp"));
+        m_outStream->setMetadataValue("timestamp_clock", std::string("syntalos_run_time"));
+        m_outStream->setMetadataValue("timestamp_reference", std::string("syntalos_run_start"));
+        m_outStream->setMetadataValue("v4l2_timestamp_clock", std::string("CLOCK_MONOTONIC"));
+        m_outStream->setMetadataValue("v4l2_timestamp_type", std::string("monotonic_required"));
+        m_outStream->setMetadataValue("v4l2_timestamp_source", std::string("soe_or_eof"));
+        m_outStream->setMetadataValue("v4l2_timestamp_sources_accepted", std::string("soe,eof"));
         m_outStream->start();
 
         statusMessage(QStringLiteral("Waiting."));
@@ -414,7 +481,6 @@ public:
         QString error;
         bool streaming = false;
         std::vector<MMapBuffer> buffers;
-        auto clockSync = initClockSynchronizer(m_effectiveMode.fps());
         std::unique_ptr<V4L2Camera::Device> device;
         {
             QMutexLocker locker(&m_deviceMutex);
@@ -443,7 +509,6 @@ public:
                 m_controlEventFd = -1;
                 ::close(controlFd);
             }
-            safeStopSynchronizer(clockSync);
             QMetaObject::invokeMethod(m_settingsDialog, [this]() { m_settingsDialog->setRunning(false); }, Qt::QueuedConnection);
             m_stopped = true;
         };
@@ -461,18 +526,6 @@ public:
 
         if (device == nullptr || !device->isOpen()) {
             raiseError(QStringLiteral("No prepared V4L2 camera device is available for capture."));
-            cleanup();
-            return;
-        }
-
-        if (!clockSync) {
-            raiseError(QStringLiteral("Unable to set up clock synchronizer!"));
-            cleanup();
-            return;
-        }
-        clockSync->setStrategies(TimeSyncStrategy::SHIFT_TIMESTAMPS_FWD | TimeSyncStrategy::SHIFT_TIMESTAMPS_BWD);
-        if (!clockSync->start()) {
-            raiseError(QStringLiteral("Unable to start clock synchronizer!"));
             cleanup();
             return;
         }
@@ -498,6 +551,29 @@ public:
             return;
         }
 
+        if (!syntalosClockCanUseV4L2Monotonic(&error)) {
+            raiseError(error);
+            cleanup();
+            return;
+        }
+
+        nanoseconds_t clockMonotonicBeforeNs;
+        nanoseconds_t clockMonotonicAfterNs;
+        if (!currentClockMonotonicNsec(&clockMonotonicBeforeNs, &error)) {
+            raiseError(error);
+            cleanup();
+            return;
+        }
+        const auto runSampleNs = m_syTimer->timeSinceStartNsec();
+        if (!currentClockMonotonicNsec(&clockMonotonicAfterNs, &error)) {
+            raiseError(error);
+            cleanup();
+            return;
+        }
+        const auto clockMonotonicAtRunSampleNs =
+            clockMonotonicBeforeNs + ((clockMonotonicAfterNs - clockMonotonicBeforeNs) / 2);
+        const auto clockMonotonicToRunOffsetNs = runSampleNs - clockMonotonicAtRunSampleNs;
+
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         if (xioctl(device->fd(), VIDIOC_STREAMON, &type) < 0) {
             raiseError(QStringLiteral("VIDIOC_STREAMON failed: %1").arg(errnoString()));
@@ -513,9 +589,6 @@ public:
         std::optional<quint32> lastSequence;
         std::optional<nanoseconds_t> lastDriverTimestamp;
         std::optional<microseconds_t> lastFrameTime;
-        bool useDriverTimestamps = true;
-        const auto expectedFrameNs = nanoseconds_t(
-            static_cast<int64_t>((1'000'000'000.0 * m_effectiveMode.timeperframeNum) / m_effectiveMode.timeperframeDen));
 
         auto lastStatusTime = std::chrono::steady_clock::now();
         uint64_t lastStatusFrame = 0;
@@ -580,86 +653,83 @@ public:
                     break;
                 }
 
-                const auto dequeueMasterNs = m_syTimer->timeSinceStartNsec();
                 if (buf.index >= buffers.size()) {
                     raiseError(QStringLiteral("V4L2 driver returned an invalid buffer index."));
                     m_running = false;
                     break;
                 }
 
-                if (lastSequence.has_value()) {
-                    const quint32 expected = *lastSequence + 1;
-                    if (buf.sequence != expected) {
-                        const quint32 gap = buf.sequence - expected;
-                        sequenceGapCount += gap == 0 ? 1 : gap;
-                        logWarning(
-                            m_log,
-                            QStringLiteral("V4L2 sequence gap detected: expected %1, got %2 (total gaps: %3).")
-                                .arg(expected)
-                                .arg(buf.sequence)
-                                .arg(sequenceGapCount));
-                    }
-                }
-                lastSequence = buf.sequence;
-
-                if ((buf.flags & V4L2_BUF_FLAG_ERROR) != 0) {
-                    droppedFrameCount++;
-                    invalidFrameCount++;
-                    logWarning(m_log, QStringLiteral("Dropping V4L2 frame marked with V4L2_BUF_FLAG_ERROR."));
+                const bool timestampMonotonic =
+                    (buf.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+                const auto driverTimestamp = v4l2TimestampToNsec(buf.timestamp);
+                if (!timestampMonotonic) {
+                    raiseError(
+                        QStringLiteral(
+                            "V4L2 buffer timestamp type is %1; camera-v4l2 requires "
+                            "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC.")
+                            .arg(timestampTypeName(buf.flags)));
+                    m_running = false;
+                } else if (!acceptedTimestampSource(buf.flags)) {
+                    raiseError(
+                        QStringLiteral(
+                            "V4L2 buffer timestamp source is %1; camera-v4l2 accepts only SOE and EOF timestamps.")
+                            .arg(timestampSourceName(buf.flags)));
+                    m_running = false;
+                } else if (driverTimestamp.count() <= 0) {
+                    raiseError(QStringLiteral("V4L2 buffer returned an invalid zero monotonic timestamp."));
+                    m_running = false;
+                } else if (lastDriverTimestamp.has_value() && driverTimestamp <= *lastDriverTimestamp) {
+                    raiseError(QStringLiteral("V4L2 monotonic timestamps are not strictly increasing."));
+                    m_running = false;
                 } else {
-                    cv::Mat image;
-                    const auto bytesUsed = buf.bytesused == 0 ? buffers[buf.index].length : static_cast<size_t>(buf.bytesused);
-                    const auto *data = static_cast<const quint8 *>(buffers[buf.index].start);
-                    if (!decoder.decode(data, bytesUsed, &image, &error)) {
+                    lastDriverTimestamp = driverTimestamp;
+                }
+
+                if (m_running) {
+                    if (lastSequence.has_value()) {
+                        const quint32 expected = *lastSequence + 1;
+                        if (buf.sequence != expected) {
+                            const quint32 gap = buf.sequence - expected;
+                            sequenceGapCount += gap == 0 ? 1 : gap;
+                            logWarning(
+                                m_log,
+                                QStringLiteral("V4L2 sequence gap detected: expected %1, got %2 (total gaps: %3).")
+                                    .arg(expected)
+                                    .arg(buf.sequence)
+                                    .arg(sequenceGapCount));
+                        }
+                    }
+                    lastSequence = buf.sequence;
+
+                    if ((buf.flags & V4L2_BUF_FLAG_ERROR) != 0) {
+                        droppedFrameCount++;
                         invalidFrameCount++;
-                        logWarning(m_log, QStringLiteral("Failed to decode V4L2 frame: %1").arg(error));
-                    } else if (image.cols != m_effectiveMode.width || image.rows != m_effectiveMode.height) {
-                        invalidFrameCount++;
-                        logWarning(
-                            m_log,
-                            QStringLiteral("Decoded V4L2 frame has unexpected dimensions %1x%2.")
-                                .arg(image.cols)
-                                .arg(image.rows));
+                        logWarning(m_log, QStringLiteral("Dropping V4L2 frame marked with V4L2_BUF_FLAG_ERROR."));
                     } else {
-                        const bool timestampMonotonic =
-                            (buf.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-                        const auto driverTimestamp = v4l2TimestampToNsec(buf.timestamp);
-                        microseconds_t frameTime = nsecToUsec(dequeueMasterNs);
+                        cv::Mat image;
+                        const auto bytesUsed =
+                            buf.bytesused == 0 ? buffers[buf.index].length : static_cast<size_t>(buf.bytesused);
+                        const auto *data = static_cast<const quint8 *>(buffers[buf.index].start);
+                        if (!decoder.decode(data, bytesUsed, &image, &error)) {
+                            invalidFrameCount++;
+                            logWarning(m_log, QStringLiteral("Failed to decode V4L2 frame: %1").arg(error));
+                        } else if (image.cols != m_effectiveMode.width || image.rows != m_effectiveMode.height) {
+                            invalidFrameCount++;
+                            logWarning(
+                                m_log,
+                                QStringLiteral("Decoded V4L2 frame has unexpected dimensions %1x%2.")
+                                    .arg(image.cols)
+                                    .arg(image.rows));
+                        } else {
+                            auto frameTime = nsecToUsec(driverTimestamp + clockMonotonicToRunOffsetNs);
 
-                        if (timestampMonotonic && useDriverTimestamps && driverTimestamp.count() > 0) {
-                            bool sane = true;
-                            if (lastDriverTimestamp.has_value()) {
-                                const auto delta = driverTimestamp - *lastDriverTimestamp;
-                                if (delta.count() <= 0 || (expectedFrameNs.count() > 0 && delta > expectedFrameNs * 20))
-                                    sane = false;
-                            }
+                            if (lastFrameTime.has_value() && frameTime <= *lastFrameTime)
+                                frameTime = *lastFrameTime + microseconds_t(1);
+                            lastFrameTime = frameTime;
 
-                            if (sane) {
-                                // Match camera-lc: keep the observed master-side dequeue time as the initial
-                                // timestamp, and let the synchronizer use the kernel timestamp to remove jitter.
-                                frameTime = nsecToUsec(dequeueMasterNs);
-                                clockSync->processTimestamp(frameTime, nsecToUsec(driverTimestamp));
-                                lastDriverTimestamp = driverTimestamp;
-                            } else {
-                                useDriverTimestamps = false;
-                                warnOnce(
-                                    &m_warnedTimestampFallback,
-                                    QStringLiteral("V4L2 Timestamp Fallback"),
-                                    QStringLiteral("Driver timestamps became implausible; using Syntalos dequeue time."));
-                            }
+                            m_outStream->push(Frame(image, frameCount++, frameTime));
+                            invalidFrameCount = 0;
                         }
-
-                        if (!timestampMonotonic || !useDriverTimestamps) {
-                            frameTime = nsecToUsec(dequeueMasterNs);
-                            clockSync->processTimestamp(frameTime, frameTime);
-                        }
-
-                        if (lastFrameTime.has_value() && frameTime <= *lastFrameTime)
-                            frameTime = *lastFrameTime + microseconds_t(1);
-                        lastFrameTime = frameTime;
-
-                        m_outStream->push(Frame(image, frameCount++, frameTime));
-                        invalidFrameCount = 0;
                     }
                 }
 
