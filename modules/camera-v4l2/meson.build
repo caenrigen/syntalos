@@ -2,6 +2,9 @@
 
 module_hdr = [
     'v4l2cameramodule.h',
+    'v4l2capture.h',
+    'v4l2controlapplier.h',
+    'v4l2controlpolicy.h',
     'v4l2device.h',
 ]
 module_moc_hdr = [
@@ -9,6 +12,9 @@ module_moc_hdr = [
 ]
 
 module_src = [
+    'v4l2capture.cpp',
+    'v4l2controlapplier.cpp',
+    'v4l2controlpolicy.cpp',
     'v4l2device.cpp',
     'v4l2settingsdialog.cpp',
 ]
