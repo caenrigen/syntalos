@@ -504,12 +504,18 @@ QString manualReapplyDelayTooltip(
     return wrappedTooltip(lines);
 }
 
-QString focusAutoCycleTooltip()
+QString focusAutoCycleTooltip(const QString &controlName)
 {
     return wrappedTooltip({
-        QStringLiteral("During prepare-time restore, if the saved Focus Auto value is off, write Focus Auto on, wait 100 ms, then restore the saved off value."),
-        QStringLiteral("This can recover cameras whose driver reports manual focus mode after reconnect or reboot while the hardware still behaves as if autofocus is active."),
-        QStringLiteral("This setting affects startup restore only; it is not used for live control changes while acquisition is running."),
+        QStringLiteral(
+            "During startup restore, force a %1 toggle before restoring the saved %1 value.")
+            .arg(controlName),
+        QStringLiteral(
+            "The module writes the opposite of the saved value first, then writes the saved value. No delay is inserted."),
+        QStringLiteral(
+            "This can recover cameras whose autofocus state is not synchronized with the reported %1 control after reconnect or reboot.")
+            .arg(controlName),
+        QStringLiteral("This setting affects startup restore only; it is not used for live control changes."),
     });
 }
 
@@ -1152,17 +1158,23 @@ QWidget *V4L2SettingsDialog::createFocusAutoCycleRow()
     grid->setContentsMargins(0, 0, 0, 0);
     grid->setColumnStretch(1, 1);
 
-    auto *label = new QLabel(QStringLiteral("Focus Auto restore cycle"), row);
-    label->setToolTip(focusAutoCycleTooltip());
+    auto focusAutoName = m_controls.value(V4L2_CID_FOCUS_AUTO).name.trimmed();
+    if (focusAutoName.isEmpty())
+        focusAutoName = QStringLiteral("Focus Auto");
+    const auto tooltip = focusAutoCycleTooltip(focusAutoName);
+
+    auto *label = new QLabel(QStringLiteral("%1 forced toggle").arg(focusAutoName), row);
+    label->setToolTip(tooltip);
 
     auto *checkBox = new QCheckBox(row);
     checkBox->setChecked(m_forceFocusAutoCycleOnRestore);
-    checkBox->setToolTip(focusAutoCycleTooltip());
-    checkBox->setAccessibleName(QStringLiteral("Cycle Focus Auto before restoring manual focus mode"));
+    checkBox->setToolTip(tooltip);
+    checkBox->setAccessibleName(
+        QStringLiteral("Force %1 toggle before restoring saved %1 value").arg(focusAutoName));
     m_forceFocusAutoCycleCheckBox = checkBox;
 
     auto *resetButton = new QPushButton(QStringLiteral("Reset"), row);
-    resetButton->setToolTip(QStringLiteral("Reset Focus Auto restore cycle to disabled."));
+    resetButton->setToolTip(QStringLiteral("Reset %1 forced toggle to disabled.").arg(focusAutoName));
     resetButton->setEnabled(m_forceFocusAutoCycleOnRestore);
 
     connect(checkBox, &QCheckBox::toggled, this, [this, resetButton](bool checked) {

@@ -182,15 +182,12 @@ ControlApplyReport ControlApplier::applyDesiredControls(
             continue;
 
         const auto requestedValue = desired.value(control.id);
-        if (request.forceFocusAutoCycleOnRestore && control.id == V4L2_CID_FOCUS_AUTO
-            && !autoControlEnabled(control.id, requestedValue)) {
-            const auto enableResult = device.setControlValue(control, 1);
+        if (request.forceFocusAutoCycleOnRestore && control.id == V4L2_CID_FOCUS_AUTO) {
+            const auto enableResult = device.setControlValue(control, requestedValue == 0 ? 1 : 0);
             if (!enableResult.success) {
                 report.logWarnings.append(
-                    QStringLiteral("Failed to cycle Focus Auto before restoring manual focus mode: %1")
+                    QStringLiteral("Failed to force Focus Auto toggle before restoring saved Focus Auto value: %1")
                         .arg(enableResult.error));
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
 
