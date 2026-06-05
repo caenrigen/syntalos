@@ -36,6 +36,88 @@ static ControlApplyWarning exposureAutoPriorityWarning()
     };
 }
 
+static bool sameMenuStructure(const QList<MenuEntry> &a, const QList<MenuEntry> &b)
+{
+    if (a.size() != b.size())
+        return false;
+
+    for (int i = 0; i < a.size(); ++i) {
+        if (a.at(i).value != b.at(i).value || a.at(i).name != b.at(i).name)
+            return false;
+    }
+
+    return true;
+}
+
+static bool sameControlStructure(const ControlInfo &a, const ControlInfo &b)
+{
+    return a.id == b.id && a.name == b.name && a.controlClass == b.controlClass && a.type == b.type
+        && a.minimum == b.minimum && a.maximum == b.maximum && a.step == b.step
+        && a.defaultValue == b.defaultValue && a.supported == b.supported && a.isDisabled() == b.isDisabled()
+        && sameMenuStructure(a.menu, b.menu);
+}
+
+static QHash<quint32, ControlInfo> controlsById(const QList<ControlInfo> &controls)
+{
+    QHash<quint32, ControlInfo> result;
+    for (const auto &control : controls) {
+        if (!control.isClassMarker())
+            result.insert(control.id, control);
+    }
+    return result;
+}
+
+static bool controlInventoryChanged(const QHash<quint32, ControlInfo> &oldControls, const QList<ControlInfo> &newControls)
+{
+    QSet<quint32> seenIds;
+    for (const auto &control : newControls) {
+        if (control.isClassMarker())
+            continue;
+
+        seenIds.insert(control.id);
+        const auto oldIt = oldControls.constFind(control.id);
+        if (oldIt == oldControls.constEnd())
+            return true;
+        if (!sameControlStructure(oldIt.value(), control))
+            return true;
+    }
+
+    for (auto it = oldControls.constBegin(); it != oldControls.constEnd(); ++it) {
+        if (!seenIds.contains(it.key()))
+            return true;
+    }
+
+    return false;
+}
+
+static QList<quint32> sortedControlWriteIds(const QHash<quint32, qint64> &pending)
+{
+    auto ids = pending.keys();
+    const auto autoIds = autoControlIds();
+    std::sort(ids.begin(), ids.end(), [&autoIds](quint32 a, quint32 b) {
+        const auto aPriority = autoIds.contains(a) || a == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+        const auto bPriority = autoIds.contains(b) || b == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+        if (aPriority != bPriority)
+            return aPriority < bPriority;
+        return a < b;
+    });
+    return ids;
+}
+
+static QList<ControlInfo> sortedControlsForRestore(const QList<ControlInfo> &controls)
+{
+    auto sorted = controls;
+    const auto autoIds = autoControlIds();
+    std::sort(sorted.begin(), sorted.end(), [&autoIds](const auto &a, const auto &b) {
+        const auto aPriority = autoIds.contains(a.id) || a.id == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+        const auto bPriority = autoIds.contains(b.id) || b.id == V4L2_CID_EXPOSURE_AUTO_PRIORITY ? 0 : 1;
+        if (aPriority != bPriority)
+            return aPriority < bPriority;
+        return a.id < b.id;
+    });
+    return sorted;
+}
+
 void ControlApplier::clearScheduledManualReapplies()
 {
     m_scheduledManualReapplies.clear();

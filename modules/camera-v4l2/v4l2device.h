@@ -17,12 +17,6 @@
 
 #include <cstdint>
 #include <optional>
-#include <vector>
-
-struct AVCodecContext;
-struct AVFrame;
-struct AVPacket;
-struct SwsContext;
 
 namespace V4L2Camera
 {
@@ -186,33 +180,6 @@ public:
 private:
     int m_fd;
     QString m_path;
-};
-
-class FrameDecoder
-{
-public:
-    FrameDecoder();
-    ~FrameDecoder();
-
-    FrameDecoder(const FrameDecoder &) = delete;
-    FrameDecoder &operator=(const FrameDecoder &) = delete;
-
-    bool configure(const CaptureMode &mode, QString *error);
-    void reset();
-    bool decode(const quint8 *data, size_t size, cv::Mat *out, QString *error);
-
-private:
-    CaptureMode m_mode;
-    AVCodecContext *m_codecCtx;
-    AVFrame *m_avFrame;
-    AVPacket *m_packet;
-    SwsContext *m_swsCtx;
-    std::vector<uint8_t> m_mjpegInputBuffer;
-    bool m_configured;
-
-    bool decodeGrey(const quint8 *data, size_t size, cv::Mat *out, QString *error);
-    bool decodeYuyv(const quint8 *data, size_t size, cv::Mat *out, QString *error);
-    bool decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QString *error);
 };
 
 } // namespace V4L2Camera

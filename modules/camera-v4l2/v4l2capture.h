@@ -14,6 +14,10 @@
 #include <vector>
 
 class VariantDataStream;
+struct AVCodecContext;
+struct AVFrame;
+struct AVPacket;
+struct SwsContext;
 
 namespace V4L2Camera
 {
@@ -24,7 +28,6 @@ struct MMapBuffer {
 };
 
 void signalEventFd(int fd);
-void drainEventFd(int fd);
 
 class EventFd
 {
@@ -34,8 +37,6 @@ public:
 
     EventFd(const EventFd &) = delete;
     EventFd &operator=(const EventFd &) = delete;
-    EventFd(EventFd &&other) noexcept;
-    EventFd &operator=(EventFd &&other) noexcept;
 
     bool open(QString *error);
     void close();
@@ -54,8 +55,6 @@ public:
 
     MMapBufferPool(const MMapBufferPool &) = delete;
     MMapBufferPool &operator=(const MMapBufferPool &) = delete;
-    MMapBufferPool(MMapBufferPool &&other) noexcept;
-    MMapBufferPool &operator=(MMapBufferPool &&other) noexcept;
 
     bool request(int fd, const CaptureMode &mode, QString *error);
     bool queueAll(QString *error) const;
@@ -83,6 +82,33 @@ public:
 private:
     int m_fd = -1;
     bool m_streaming = false;
+};
+
+class FrameDecoder
+{
+public:
+    FrameDecoder();
+    ~FrameDecoder();
+
+    FrameDecoder(const FrameDecoder &) = delete;
+    FrameDecoder &operator=(const FrameDecoder &) = delete;
+
+    bool configure(const CaptureMode &mode, QString *error);
+    void reset();
+    bool decode(const quint8 *data, size_t size, cv::Mat *out, QString *error);
+
+private:
+    CaptureMode m_mode;
+    AVCodecContext *m_codecCtx;
+    AVFrame *m_avFrame;
+    AVPacket *m_packet;
+    SwsContext *m_swsCtx;
+    std::vector<uint8_t> m_mjpegInputBuffer;
+    bool m_configured;
+
+    bool decodeGrey(const quint8 *data, size_t size, cv::Mat *out, QString *error);
+    bool decodeYuyv(const quint8 *data, size_t size, cv::Mat *out, QString *error);
+    bool decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QString *error);
 };
 
 void setFrameStreamMetadata(VariantDataStream *stream, const CaptureMode &mode);

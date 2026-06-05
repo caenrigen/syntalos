@@ -11,7 +11,6 @@
 #include "utils/misc.h"
 #include "v4l2capture.h"
 #include "v4l2controlapplier.h"
-#include "v4l2controlpolicy.h"
 #include "v4l2settingsdialog.h"
 
 #include <QApplication>
@@ -208,7 +207,6 @@ public:
             QMutexLocker locker(&m_controlMutex);
             m_pendingControlWrites.clear();
             m_pendingButtonControls.clear();
-            m_manualReapplyDelaysMs = m_settingsDialog->manualReapplyDelaysMs();
         }
         m_controlApplier.clearScheduledManualReapplies();
 
@@ -248,7 +246,7 @@ public:
         auto preparedDevice = std::make_unique<V4L2Camera::Device>();
         QList<V4L2Camera::ControlInfo> controls;
         QString error;
-        if (!configureDevice(*preparedDevice, &m_effectiveMode, &controls, &error, true)) {
+        if (!configureDevice(*preparedDevice, m_effectiveMode, controls, &error)) {
             raiseError(error);
             return false;
         }
@@ -259,7 +257,7 @@ public:
             return false;
         }
 
-        updateControlMap(controls);
+        m_controlApplier.updateControlMap(controls);
         {
             QMutexLocker locker(&m_deviceMutex);
             m_preparedDevice = std::move(preparedDevice);
@@ -600,32 +598,28 @@ private:
 
     bool configureDevice(
         V4L2Camera::Device &device,
-        V4L2Camera::CaptureMode *effectiveMode,
-        QList<V4L2Camera::ControlInfo> *controls,
-        QString *error,
-        bool applyControls)
+        V4L2Camera::CaptureMode &effectiveMode,
+        QList<V4L2Camera::ControlInfo> &controls,
+        QString *error)
     {
         if (!device.isOpen() && !device.open(m_device.devicePath, error))
             return false;
 
-        if (!device.applyCaptureMode(m_requestedMode, effectiveMode, error))
+        if (!device.applyCaptureMode(m_requestedMode, &effectiveMode, error))
             return false;
 
         auto queriedControls = device.queryControls(nullptr);
-        if (applyControls) {
-            applyDesiredControls(device, &queriedControls);
+        applyDesiredControls(device, queriedControls);
 
-            queriedControls = device.queryControls(nullptr);
-            if (!device.applyCaptureMode(m_requestedMode, effectiveMode, error))
-                return false;
-        }
+        queriedControls = device.queryControls(nullptr);
+        if (!device.applyCaptureMode(m_requestedMode, &effectiveMode, error))
+            return false;
 
-        if (controls != nullptr)
-            *controls = queriedControls;
+        controls = queriedControls;
         return true;
     }
 
-    void applyDesiredControls(V4L2Camera::Device &device, QList<V4L2Camera::ControlInfo> *controls)
+    void applyDesiredControls(V4L2Camera::Device &device, QList<V4L2Camera::ControlInfo> &controls)
     {
         V4L2Camera::ControlRestoreRequest request;
         {
@@ -635,7 +629,7 @@ private:
             request.forceFocusAutoCycleOnRestore = m_forceFocusAutoCycleOnRestore;
         }
 
-        const auto report = m_controlApplier.applyDesiredControls(device, *controls, request);
+        const auto report = m_controlApplier.applyDesiredControls(device, controls, request);
         {
             QMutexLocker locker(&m_controlMutex);
             m_desiredControlValues = report.desiredValues;
@@ -693,11 +687,6 @@ private:
                     Qt::QueuedConnection);
             }
         }
-    }
-
-    void updateControlMap(const QList<V4L2Camera::ControlInfo> &controls)
-    {
-        m_controlApplier.updateControlMap(controls);
     }
 
     void publishControlReportWarnings(const V4L2Camera::ControlApplyReport &report)

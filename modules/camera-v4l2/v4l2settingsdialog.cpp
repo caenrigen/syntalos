@@ -761,13 +761,7 @@ void V4L2SettingsDialog::setEffectiveMode(const V4L2Camera::CaptureMode &mode)
 
 void V4L2SettingsDialog::updateControlReadback(quint32 id, qint64 value)
 {
-    if (!m_controls.contains(id))
-        return;
-
-    m_controls[id].currentValue = value;
-    m_desiredValues[id] = value;
-    setControlWidgetValue(id, value);
-    updateDependencyStates();
+    applyControlValue(id, value);
 }
 
 void V4L2SettingsDialog::updateControls(const QList<V4L2Camera::ControlInfo> &controls, const QSet<quint32> &affectedIds)
@@ -786,9 +780,8 @@ void V4L2SettingsDialog::updateControls(const QList<V4L2Camera::ControlInfo> &co
         if (it == queriedControls.constEnd() || !m_controlWidgets.contains(id))
             continue;
 
-        m_controls[id] = it.value();
-        m_desiredValues[id] = it->currentValue;
-        setControlWidgetValue(id, it->currentValue);
+        const auto &control = it.value();
+        applyControlValue(id, control.currentValue, &control, false);
     }
 
     updateDependencyStates();
@@ -1415,6 +1408,24 @@ void V4L2SettingsDialog::setControlWidgetValue(quint32 id, qint64 value)
     m_blockUiSignals = oldBlockState;
 }
 
+void V4L2SettingsDialog::applyControlValue(
+    quint32 id,
+    qint64 value,
+    const V4L2Camera::ControlInfo *updatedControl,
+    bool refreshDependencies)
+{
+    if (updatedControl != nullptr)
+        m_controls[id] = *updatedControl;
+    else if (!m_controls.contains(id))
+        return;
+
+    m_controls[id].currentValue = value;
+    m_desiredValues[id] = value;
+    setControlWidgetValue(id, value);
+    if (refreshDependencies)
+        updateDependencyStates();
+}
+
 void V4L2SettingsDialog::handleControlEdited(quint32 id, qint64 value)
 {
     if (!m_controls.contains(id))
@@ -1422,10 +1433,7 @@ void V4L2SettingsDialog::handleControlEdited(quint32 id, qint64 value)
 
     auto &control = m_controls[id];
     value = clampControlValue(control, value);
-    control.currentValue = value;
-    m_desiredValues[id] = value;
-    setControlWidgetValue(id, value);
-    updateDependencyStates();
+    applyControlValue(id, value);
     Q_EMIT controlValueChanged(id, value);
 }
 

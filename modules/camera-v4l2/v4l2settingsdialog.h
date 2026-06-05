@@ -103,6 +103,11 @@ private:
     QWidget *createFocusAutoCycleRow();
     QWidget *createControlRow(const V4L2Camera::ControlInfo &control);
     QWidget *createManualReapplyDelayRow(const V4L2Camera::ControlInfo &control);
+    void applyControlValue(
+        quint32 id,
+        qint64 value,
+        const V4L2Camera::ControlInfo *updatedControl = nullptr,
+        bool refreshDependencies = true);
     void setControlWidgetValue(quint32 id, qint64 value);
     void handleControlEdited(quint32 id, qint64 value);
     void updateControlPresentation(quint32 id, const QString &disabledReason = QString());
