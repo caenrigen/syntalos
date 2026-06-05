@@ -182,6 +182,14 @@ ControlApplyReport ControlApplier::applyDesiredControls(
             continue;
 
         const auto requestedValue = desired.value(control.id);
+        
+        // Logitech C930e quirk: Auto focus can remain active after a device (re)plug
+        // despite v4l2 reporting it as being in manual focus mode.
+        // Toggling it once solves it. To make it work reliably it must be performed after 
+        // starting the stream. Therefore, we apply all desired values after stream start.
+        // Perhaps this ensures that the camera is more responsive to control changes.
+        // However, we don't know if some controls must be configured before starting the
+        // stream.
         if (request.forceFocusAutoCycleOnRestore && control.id == V4L2_CID_FOCUS_AUTO) {
             const auto enableResult = device.setControlValue(control, requestedValue == 0 ? 1 : 0);
             if (!enableResult.success) {
