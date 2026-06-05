@@ -612,9 +612,6 @@ private:
         applyDesiredControls(device, queriedControls);
 
         queriedControls = device.queryControls(nullptr);
-        if (!device.applyCaptureMode(m_requestedMode, &effectiveMode, error))
-            return false;
-
         controls = queriedControls;
         return true;
     }
