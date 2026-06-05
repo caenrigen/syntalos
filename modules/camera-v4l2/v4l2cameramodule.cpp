@@ -244,9 +244,8 @@ public:
         }
 
         auto preparedDevice = std::make_unique<V4L2Camera::Device>();
-        QList<V4L2Camera::ControlInfo> controls;
         QString error;
-        if (!configureDevice(*preparedDevice, m_effectiveMode, controls, &error)) {
+        if (!configureCapture(*preparedDevice, m_effectiveMode, &error)) {
             raiseError(error);
             return false;
         }
@@ -257,12 +256,10 @@ public:
             return false;
         }
 
-        m_controlApplier.updateControlMap(controls);
         {
             QMutexLocker locker(&m_deviceMutex);
             m_preparedDevice = std::move(preparedDevice);
         }
-        m_settingsDialog->replaceControls(controls);
         m_settingsDialog->setEffectiveMode(m_effectiveMode);
         m_settingsDialog->setRunning(true);
 
@@ -355,6 +352,25 @@ public:
             raiseError(error);
             return;
         }
+
+        QString controlError;
+        auto controls = device->queryControls(&controlError);
+        if (!controlError.isEmpty()) {
+            logWarning(m_log, QStringLiteral("Unable to query V4L2 controls after stream start: %1").arg(controlError));
+        }
+        applyDesiredControls(*device, controls);
+        controlError.clear();
+        auto refreshedControls = device->queryControls(&controlError);
+        if (!controlError.isEmpty()) {
+            logWarning(
+                m_log,
+                QStringLiteral("Unable to refresh V4L2 controls after stream-start restore: %1").arg(controlError));
+        }
+        m_controlApplier.updateControlMap(refreshedControls);
+        QMetaObject::invokeMethod(
+            m_settingsDialog,
+            [this, controls = std::move(refreshedControls)]() { m_settingsDialog->replaceControls(controls); },
+            Qt::QueuedConnection);
 
         uint64_t frameCount = 0;
         uint64_t invalidFrameCount = 0;
@@ -596,11 +612,7 @@ private:
         return m_preparedDevice != nullptr;
     }
 
-    bool configureDevice(
-        V4L2Camera::Device &device,
-        V4L2Camera::CaptureMode &effectiveMode,
-        QList<V4L2Camera::ControlInfo> &controls,
-        QString *error)
+    bool configureCapture(V4L2Camera::Device &device, V4L2Camera::CaptureMode &effectiveMode, QString *error)
     {
         if (!device.isOpen() && !device.open(m_device.devicePath, error))
             return false;
@@ -608,11 +620,6 @@ private:
         if (!device.applyCaptureMode(m_requestedMode, &effectiveMode, error))
             return false;
 
-        auto queriedControls = device.queryControls(nullptr);
-        applyDesiredControls(device, queriedControls);
-
-        queriedControls = device.queryControls(nullptr);
-        controls = queriedControls;
         return true;
     }
 
