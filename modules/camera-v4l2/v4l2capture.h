@@ -95,7 +95,7 @@ public:
 
     bool configure(const CaptureMode &mode, QString *error);
     void reset();
-    bool decode(const quint8 *data, size_t size, cv::Mat *out, QString *error);
+    bool decode(const quint8 *data, size_t size, cv::Mat *out, QString *error, bool *fatalError = nullptr);
 
 private:
     CaptureMode m_mode;
@@ -108,7 +108,7 @@ private:
 
     bool decodeGrey(const quint8 *data, size_t size, cv::Mat *out, QString *error);
     bool decodeYuyv(const quint8 *data, size_t size, cv::Mat *out, QString *error);
-    bool decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QString *error);
+    bool decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QString *error, bool *fatalError);
 };
 
 void setFrameStreamMetadata(VariantDataStream *stream, const CaptureMode &mode);

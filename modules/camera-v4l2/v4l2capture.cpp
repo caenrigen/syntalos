@@ -379,8 +379,11 @@ void FrameDecoder::reset()
     m_configured = false;
 }
 
-bool FrameDecoder::decode(const quint8 *data, size_t size, cv::Mat *out, QString *error)
+bool FrameDecoder::decode(const quint8 *data, size_t size, cv::Mat *out, QString *error, bool *fatalError)
 {
+    if (fatalError != nullptr)
+        *fatalError = false;
+
     if (!m_configured) {
         if (error != nullptr)
             *error = QStringLiteral("V4L2 frame decoder is not configured.");
@@ -392,16 +395,36 @@ bool FrameDecoder::decode(const quint8 *data, size_t size, cv::Mat *out, QString
         return false;
     }
 
+    bool decoded = false;
     if (m_mode.fourcc == V4L2_PIX_FMT_GREY)
-        return decodeGrey(data, size, out, error);
-    if (m_mode.fourcc == V4L2_PIX_FMT_YUYV)
-        return decodeYuyv(data, size, out, error);
-    if (m_mode.fourcc == V4L2_PIX_FMT_MJPEG || m_mode.fourcc == v4l2_fourcc('M', 'J', 'P', 'G'))
-        return decodeMjpeg(data, size, out, error);
+        decoded = decodeGrey(data, size, out, error);
+    else if (m_mode.fourcc == V4L2_PIX_FMT_YUYV)
+        decoded = decodeYuyv(data, size, out, error);
+    else if (m_mode.fourcc == V4L2_PIX_FMT_MJPEG || m_mode.fourcc == v4l2_fourcc('M', 'J', 'P', 'G'))
+        decoded = decodeMjpeg(data, size, out, error, fatalError);
+    else {
+        if (error != nullptr)
+            *error = QStringLiteral("Unsupported V4L2 pixel format %1.").arg(m_mode.fourccString);
+        return false;
+    }
 
-    if (error != nullptr)
-        *error = QStringLiteral("Unsupported V4L2 pixel format %1.").arg(m_mode.fourccString);
-    return false;
+    if (!decoded)
+        return false;
+
+    if (out->cols != m_mode.width || out->rows != m_mode.height) {
+        if (error != nullptr) {
+            *error = QStringLiteral("Decoded V4L2 frame has unexpected dimensions %1x%2; expected %3x%4.")
+                         .arg(out->cols)
+                         .arg(out->rows)
+                         .arg(m_mode.width)
+                         .arg(m_mode.height);
+        }
+        if (fatalError != nullptr)
+            *fatalError = true;
+        return false;
+    }
+
+    return true;
 }
 
 bool FrameDecoder::decodeGrey(const quint8 *data, size_t size, cv::Mat *out, QString *error)
@@ -459,7 +482,7 @@ bool FrameDecoder::decodeYuyv(const quint8 *data, size_t size, cv::Mat *out, QSt
     return true;
 }
 
-bool FrameDecoder::decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QString *error)
+bool FrameDecoder::decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QString *error, bool *fatalError)
 {
     if (m_codecCtx == nullptr || m_avFrame == nullptr || m_packet == nullptr) {
         if (error != nullptr)
@@ -504,6 +527,20 @@ bool FrameDecoder::decodeMjpeg(const quint8 *data, size_t size, cv::Mat *out, QS
     if (ret < 0) {
         if (error != nullptr)
             *error = QStringLiteral("MJPEG decoder did not return a frame: %1").arg(avErrorString(ret));
+        return false;
+    }
+
+    if (m_avFrame->width != m_mode.width || m_avFrame->height != m_mode.height) {
+        if (error != nullptr) {
+            *error = QStringLiteral("MJPEG decoded to unexpected dimensions %1x%2; expected %3x%4.")
+                         .arg(m_avFrame->width)
+                         .arg(m_avFrame->height)
+                         .arg(m_mode.width)
+                         .arg(m_mode.height);
+        }
+        if (fatalError != nullptr)
+            *fatalError = true;
+        av_frame_unref(m_avFrame);
         return false;
     }
 

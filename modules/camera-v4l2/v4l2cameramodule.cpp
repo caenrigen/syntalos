@@ -507,16 +507,16 @@ public:
                         const auto bytesUsed =
                             buf.bytesused == 0 ? buffers[buf.index].length : static_cast<size_t>(buf.bytesused);
                         const auto *data = static_cast<const quint8 *>(buffers[buf.index].start);
-                        if (!decoder.decode(data, bytesUsed, &image, &error)) {
+                        bool fatalDecodeError = false;
+                        if (!decoder.decode(data, bytesUsed, &image, &error, &fatalDecodeError)) {
                             invalidFrameCount++;
-                            logWarning(m_log, QStringLiteral("Failed to decode V4L2 frame: %1").arg(error));
-                        } else if (image.cols != m_effectiveMode.width || image.rows != m_effectiveMode.height) {
-                            invalidFrameCount++;
-                            logWarning(
-                                m_log,
-                                QStringLiteral("Decoded V4L2 frame has unexpected dimensions %1x%2.")
-                                    .arg(image.cols)
-                                    .arg(image.rows));
+                            const auto message = QStringLiteral("Failed to decode V4L2 frame: %1").arg(error);
+                            if (fatalDecodeError) {
+                                raiseError(message);
+                                m_running = false;
+                            } else {
+                                logWarning(m_log, message);
+                            }
                         } else {
                             auto frameTime = nsecToUsec(driverTimestamp + clockMonotonicToRunOffsetNs);
 
