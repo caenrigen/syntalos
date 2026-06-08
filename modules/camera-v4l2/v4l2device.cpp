@@ -1085,8 +1085,14 @@ QList<ControlInfo> Device::queryControls(QString *error) const
                     continue;
 
                 MenuEntry entry;
-                entry.value = control.type == V4L2_CTRL_TYPE_INTEGER_MENU ? menu.value : value;
-                entry.name = QString::fromUtf8(reinterpret_cast<const char *>(menu.name)).trimmed();
+                entry.value = value;
+                if (control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
+                    entry.integerValue = menu.value;
+                    entry.hasIntegerValue = true;
+                    entry.name = QString::number(menu.value);
+                } else {
+                    entry.name = QString::fromUtf8(reinterpret_cast<const char *>(menu.name)).trimmed();
+                }
                 control.menu.append(entry);
             }
         }

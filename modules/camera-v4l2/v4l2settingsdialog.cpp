@@ -272,20 +272,18 @@ QString controlApiId(const V4L2Camera::ControlInfo &control)
     return QStringLiteral("%1 (%2)").arg(symbolicName, hexId(control.id));
 }
 
-QString menuValueName(const V4L2Camera::ControlInfo &control, qint64 value)
-{
-    for (const auto &entry : control.menu) {
-        if (entry.value == value)
-            return entry.name;
-    }
-    return {};
-}
-
 QString rawControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
 {
     if (control.type == V4L2_CTRL_TYPE_BITMASK)
         return QStringLiteral("%1 / %2").arg(hexValue(control, value), QString::number(value));
     return QString::number(value);
+}
+
+QString menuRawValue(const V4L2Camera::ControlInfo &control, const V4L2Camera::MenuEntry &entry)
+{
+    if (control.type == V4L2_CTRL_TYPE_INTEGER_MENU && entry.hasIntegerValue)
+        return QStringLiteral("index: %1, value: %2").arg(entry.value).arg(entry.integerValue);
+    return rawControlValue(control, entry.value);
 }
 
 QString formatControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
@@ -294,9 +292,10 @@ QString formatControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
         return value != 0 ? QStringLiteral("true (1)") : QStringLiteral("false (0)");
 
     if (control.type == V4L2_CTRL_TYPE_MENU || control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
-        const auto name = menuValueName(control, value);
-        if (!name.isEmpty())
-            return QStringLiteral("%1 [raw: %2]").arg(name, rawControlValue(control, value));
+        for (const auto &entry : control.menu) {
+            if (entry.value == value && !entry.name.isEmpty())
+                return QStringLiteral("%1 [raw: %2]").arg(entry.name, menuRawValue(control, entry));
+        }
         return QStringLiteral("Unknown [raw: %1]").arg(rawControlValue(control, value));
     }
 
@@ -309,8 +308,24 @@ QString formatControlValue(const V4L2Camera::ControlInfo &control, qint64 value)
 QString menuEntryText(const V4L2Camera::ControlInfo &control, const V4L2Camera::MenuEntry &entry)
 {
     if (entry.name.isEmpty())
-        return QStringLiteral("Raw %1").arg(rawControlValue(control, entry.value));
-    return QStringLiteral("%1 [raw: %2]").arg(entry.name, rawControlValue(control, entry.value));
+        return QStringLiteral("Raw %1").arg(menuRawValue(control, entry));
+    return QStringLiteral("%1 [raw: %2]").arg(entry.name, menuRawValue(control, entry));
+}
+
+qint64 restoredControlValue(const V4L2Camera::ControlInfo &control, qint64 savedValue)
+{
+    if (control.type == V4L2_CTRL_TYPE_INTEGER_MENU) {
+        for (const auto &entry : control.menu) {
+            if (entry.value == savedValue)
+                return savedValue;
+        }
+        for (const auto &entry : control.menu) {
+            if (entry.hasIntegerValue && entry.integerValue == savedValue)
+                return entry.value;
+        }
+    }
+
+    return clampControlValue(control, savedValue);
 }
 
 QString editorTextForValue(const V4L2Camera::ControlInfo &control, qint64 value)
@@ -1084,7 +1099,7 @@ void V4L2SettingsDialog::rebuildControls(const QList<V4L2Camera::ControlInfo> &c
             continue;
 
         if (applyLoadedValues && m_loadedControlValues.contains(control.id))
-            control.currentValue = clampControlValue(control, m_loadedControlValues.value(control.id));
+            control.currentValue = restoredControlValue(control, m_loadedControlValues.value(control.id));
 
         m_controls.insert(control.id, control);
         m_desiredValues.insert(control.id, control.currentValue);
@@ -1564,6 +1579,8 @@ QVariantList V4L2SettingsDialog::serializableControlSettings() const
             QVariantHash menuEntry;
             menuEntry.insert(QStringLiteral("value"), entry.value);
             menuEntry.insert(QStringLiteral("name"), entry.name);
+            if (entry.hasIntegerValue)
+                menuEntry.insert(QStringLiteral("integer_value"), entry.integerValue);
             menuEntries.append(menuEntry);
         }
 

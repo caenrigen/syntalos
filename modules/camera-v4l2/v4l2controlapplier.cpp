@@ -42,7 +42,8 @@ static bool sameMenuStructure(const QList<MenuEntry> &a, const QList<MenuEntry> 
         return false;
 
     for (int i = 0; i < a.size(); ++i) {
-        if (a.at(i).value != b.at(i).value || a.at(i).name != b.at(i).name)
+        if (a.at(i).value != b.at(i).value || a.at(i).integerValue != b.at(i).integerValue
+            || a.at(i).hasIntegerValue != b.at(i).hasIntegerValue || a.at(i).name != b.at(i).name)
             return false;
     }
 

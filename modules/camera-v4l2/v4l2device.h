@@ -89,6 +89,8 @@ struct CaptureMode {
 
 struct MenuEntry {
     qint64 value = 0;
+    qint64 integerValue = 0;
+    bool hasIntegerValue = false;
     QString name;
 };
 
