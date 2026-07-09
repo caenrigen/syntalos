@@ -21,10 +21,47 @@
 
 #include <iox2/iceoryx2.hpp>
 
+#include <cstdint>
+#include <string_view>
+
 namespace fs = std::filesystem;
 
 namespace Syntalos::ipc
 {
+
+namespace
+{
+
+uint64_t stablePathHash(std::string_view value)
+{
+    uint64_t hash = 14695981039346656037ULL;
+
+    for (const auto ch : value) {
+        hash ^= static_cast<unsigned char>(ch);
+        hash *= 1099511628211ULL;
+    }
+
+    return hash;
+}
+
+iox2::bb::FileName makeIoxPrefixForRootPath(std::string_view rootPath)
+{
+    constexpr char hexChars[] = "0123456789abcdef";
+    const auto hash = stablePathHash(rootPath);
+
+    std::string prefix = "sy_";
+    for (int shift = 60; shift >= 0; shift -= 4)
+        prefix.push_back(hexChars[(hash >> shift) & 0x0f]);
+    prefix.push_back('_');
+
+    const auto staticPrefix =
+        iox2::bb::StaticString<iox2::bb::platform::IOX2_MAX_FILENAME_LENGTH>::from_utf8_null_terminated_unchecked(
+            prefix.c_str())
+            .value();
+    return iox2::bb::FileName::create(staticPrefix).value();
+}
+
+} // namespace
 
 std::string makeModuleServiceName(const std::string &instanceId, const std::string &channelName)
 {
@@ -64,13 +101,16 @@ const iox2::Config &ioxDefaultConfig()
             runtimeDir = fs::path("/tmp");
         }
 
+        const auto rootPathFs = runtimeDir / "syntalos-iox";
+        const auto rootPathString = rootPathFs.string();
         const auto rootPath =
             iox2::bb::StaticString<iox2::bb::platform::IOX2_MAX_PATH_LENGTH>::from_utf8_null_terminated_unchecked(
-                (runtimeDir / "syntalos-iox").c_str())
+                rootPathString.c_str())
                 .value();
 
         cfg.global().set_root_path(iox2::bb::Path::create(rootPath).value());
-        cfg.global().set_prefix(iox2::bb::FileName::create("sy_").value());
+        // Work around POSIX shm objects ignoring root_path by namespacing the prefix per runtime directory.
+        cfg.global().set_prefix(makeIoxPrefixForRootPath(rootPathString));
 
         cfg.global().node().set_cleanup_dead_nodes_on_creation(true);
         cfg.global().node().set_cleanup_dead_nodes_on_destruction(true);
