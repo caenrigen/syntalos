@@ -48,7 +48,7 @@ jobs:
         distros = json.load(open('.github/distros.json'))
         runners = [
             {'runner': 'ubuntu-latest',    'arch': 'amd64'},
-            {'runner': 'ubuntu-24.04-arm', 'arch': 'arm64'},
+            {'runner': 'ubuntu-26.04-arm', 'arch': 'arm64'},
         ]
 
         includes = []

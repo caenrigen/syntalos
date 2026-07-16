@@ -25,7 +25,7 @@ jobs:
             display_name: Debian Stable (arm64)
             suite: trixie
             components: main
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
           - runner: ubuntu-latest
             id: debian-testing
             display_name: Debian Testing
