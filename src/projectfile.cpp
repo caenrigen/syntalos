@@ -117,9 +117,10 @@ static bool saveProjectConfigInternal(
     tar.writeFile("graph.toml", qVariantHashToTomlData(graphView->settings()));
 
     // save module settings
-    auto modIndex = 0;
+    int modIndex = 0;
     for (auto &mod : engine->presentModules()) {
-        if (!tar.writeDir(QString::number(modIndex)))
+        const auto dirEntryId = QStringLiteral("%1-%2").arg(modIndex, 3, 10, QChar('0')).arg(mod->id());
+        if (!tar.writeDir(dirEntryId))
             return false;
 
         QVariantHash modSettings;
@@ -129,10 +130,10 @@ static bool saveProjectConfigInternal(
         mod->serializeSettings(confBaseDir.absolutePath(), modSettings, modExtraData);
         if (!modSettings.isEmpty())
             tar.writeFile(
-                QStringLiteral("%1/%2.toml").arg(modIndex).arg(mod->id()),
+                QStringLiteral("%1/%2.toml").arg(dirEntryId).arg(mod->id()),
                 qVariantHashToTomlData(modSettings));
         if (!modExtraData.isEmpty())
-            tar.writeFile(QStringLiteral("%1/%2.dat").arg(modIndex).arg(mod->id()), modExtraData);
+            tar.writeFile(QStringLiteral("%1/%2.dat").arg(dirEntryId).arg(mod->id()), modExtraData);
 
         QVariantHash modInfo;
         modInfo.insert("id", mod->id());
@@ -152,7 +153,7 @@ static bool saveProjectConfigInternal(
         }
 
         modInfo.insert("subscriptions", modSubs);
-        tar.writeFile(QStringLiteral("%1/info.toml").arg(modIndex), qVariantHashToTomlData(modInfo));
+        tar.writeFile(QStringLiteral("%1/info.toml").arg(dirEntryId), qVariantHashToTomlData(modInfo));
 
         modIndex++;
     }
@@ -327,7 +328,9 @@ bool loadProjectConfigurationInteractive(
     setStatusText(statusFn, "Destroying old modules...");
     engine->removeAllModules();
     auto rootEntries = rootDir->entries();
-    rootEntries.sort();
+    std::sort(rootEntries.begin(), rootEntries.end(), [](const QString &a, const QString &b) {
+        return ::strverscmp(qPrintable(a), qPrintable(b)) < 0;
+    });
 
     // load graph settings
     auto graphFile = rootDir->file("graph.toml");
