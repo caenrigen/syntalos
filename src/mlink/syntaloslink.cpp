@@ -1324,7 +1324,7 @@ void SyntalosLink::setState(ModuleState state)
 void SyntalosLink::setStatusMessage(const std::string &message)
 {
     auto uninit = d->pubStatusMsg->loan_uninit().value();
-    uninit.payload_mut().text = iox2::bb::StaticString<512>::from_utf8_null_terminated_unchecked_truncated(
+    uninit.payload_mut().text = iox2::bb::StaticString<128>::from_utf8_null_terminated_unchecked_truncated(
         message.c_str(),
         message.size());
     iox2::send(iox2::assume_init(std::move(uninit))).value();
