@@ -282,7 +282,7 @@ static const std::string STATE_CHANNEL_ID = "State";
  * Event sending a status message to master.
  */
 struct StatusMessageEvent {
-    iox2::bb::StaticString<512> text;
+    iox2::bb::StaticString<128> text;
 };
 static const std::string STATUS_MESSAGE_CHANNEL_ID = "StatusMessage";
 
