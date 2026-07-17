@@ -1381,7 +1381,7 @@ bool VideoWriter::encodeFrame(const cv::Mat &frame, const std::chrono::microseco
     // encode video frame
     ret = avcodec_send_frame(d->cctx, outputFrame);
     if (ret < 0) {
-        d->lastError = QStringLiteral("Unable to send frame to encoder. N: %1").arg(d->framesN + 1).toStdString();
+        d->lastError = std::format("Unable to send frame {} to encoder: {}.", d->framesN + 1, averrorToString(ret));
         std::cerr << d->lastError << std::endl;
         goto out;
     }
