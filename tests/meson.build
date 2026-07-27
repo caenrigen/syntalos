@@ -1,5 +1,6 @@
 
 subdir('rwqueue')
+subdir('benchmarks')
 
 test_env = environment()
 test_env.set('MIMALLOC_SHOW_ERRORS', '1')
