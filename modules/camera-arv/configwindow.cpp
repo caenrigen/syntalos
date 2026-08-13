@@ -495,16 +495,15 @@ void ArvConfigWindow::setCameraInUse(bool camInUse)
         wgt->setEnabled(!camInUse);
 
     started = camInUse;
-    if (!camInUse) {
-        if (camera)
-            camera->setFPS(fpsSpinbox->value());
-    }
 }
 
 void ArvConfigWindow::setCameraInUseExternal(bool camInUse)
 {
     playButton->setChecked(false);
-    toggleVideoPreview(false);
+    if (camInUse) {
+        // Only needed while entering external acquisition, to stop a real preview.
+        toggleVideoPreview(false);
+    }
     videoWidget->setImage();
 
     // Update realFps, an externally started run is never a preview
@@ -973,6 +972,14 @@ void ArvConfigWindow::loadSettings(const QVariantHash &settings, const QByteArra
 
     QStringList failures;
 
+    // Set fps/gain/exposure explicitly, as those may be software settings
+    // and not camera attributes that were restored previously.
+    // Setting the FPS resets Trigger-related advanced settings, therefore 
+    // FPS must be configured before applying the advanced settings.
+    camera->setFPS(camSettings["fps"].toInt());
+    camera->setGain(camSettings["gain"].toDouble());
+    camera->setExposure(camSettings["exposure"].toDouble());
+    
     // Try setting features repeatedly, but stop once all values match.
     for (int i = 0; i < 12; i++) {
         wholefile.seek(0);
@@ -1022,11 +1029,6 @@ void ArvConfigWindow::loadSettings(const QVariantHash &settings, const QByteArra
             message);
     }
 
-    // Set fps/gain/exposure explicitly, as those may be software settings
-    // and not camera attributes that were restored previously
-    camera->setFPS(camSettings["fps"].toInt());
-    camera->setGain(camSettings["gain"].toDouble());
-    camera->setExposure(camSettings["exposure"].toDouble());
 }
 
 void ArvConfigWindow::refreshCameras()
