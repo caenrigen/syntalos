@@ -49,6 +49,9 @@ endif
 if 'miniscope' in modules_enabled
     subdir('miniscope')
 endif
+if 'camera-pylon' in modules_enabled
+    subdir('camera-pylon')
+endif
 subdir('triled-tracker')
 
 # Device support

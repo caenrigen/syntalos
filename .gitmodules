@@ -1,3 +1,6 @@
+[submodule "modules/camera-pylon"]
+	path = modules/camera-pylon
+	url = git@gitlab.com:innovation-lab-emc/syntalos_camera_pylon.git
 [submodule "vendor/imgui"]
 	path = vendor/imgui
 	url = https://github.com/ocornut/imgui.git
