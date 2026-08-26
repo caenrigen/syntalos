@@ -10,3 +10,6 @@
 [submodule "vendor/SpikeGLX-CPP-SDK"]
 	path = vendor/SpikeGLX-CPP-SDK
 	url = https://github.com/billkarsh/SpikeGLX-CPP-SDK.git
+[submodule "modules/camera-arv-basic"]
+	path = modules/camera-arv-basic
+	url = git@gitlab.com:innovation-lab-emc/syntalos_camera_arv_basic.git

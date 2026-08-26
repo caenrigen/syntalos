@@ -4,6 +4,7 @@
 option('modules',
        type: 'array',
        choices: [
+           'camera-arv-basic', # Minimal configurable direct-Aravis acquisition
            'camera-arv',     # Module for GenICam camera support via Aravis
            'camera-flir',    # FLIR camera module using the Spinnaker API
            'camera-lc',      # Camera module using libcamera
