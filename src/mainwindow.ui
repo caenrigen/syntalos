@@ -1366,9 +1366,6 @@
    <property name="text">
     <string>Run</string>
    </property>
-   <property name="shortcut">
-    <string>Ctrl+Space</string>
-   </property>
   </action>
   <action name="actionStop">
    <property name="icon">
@@ -1377,9 +1374,6 @@
    </property>
    <property name="text">
     <string>Stop</string>
-   </property>
-   <property name="shortcut">
-    <string>Space</string>
    </property>
   </action>
   <action name="actionProjectOpen">
